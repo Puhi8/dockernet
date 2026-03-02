@@ -1,0 +1,4 @@
+Usage:
+  dockernet [global flags] nextFree|nextfree [-g|--group <name>] [-n|--network <name>] [count]
+
+Returns next free IPs for one or all groups.

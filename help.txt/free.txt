@@ -1,0 +1,4 @@
+Usage:
+  dockernet [global flags] free -g|--group <name> [-n|--network <name>] [-l|--limit <n>]
+
+Returns free IPs for the selected group and network scope.

@@ -1,0 +1,4 @@
+Usage:
+  dockernet [global flags] ps [-r|--running] [-c|--compose-only] [-n|--network <name>] [-i|--ip-prefix <x.y.z>]
+
+Output: container/service, network, ip, running, source

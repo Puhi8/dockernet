@@ -1,0 +1,7 @@
+Usage:
+  dockernet [global flags] ls
+
+Shows:
+  - discovered networks
+  - scanned compose files
+  - static/running IP counts
