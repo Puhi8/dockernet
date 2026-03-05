@@ -46,15 +46,7 @@ func discoverState(ctx context.Context, opts runtimeOptions) (*discoveryResult, 
 	}
 
 	for _, composeFile := range filteredComposeFiles {
-		parsed, ok := parsedByFile[composeFile]
-		if !ok {
-			parsedNow, err := parseComposeFile(composeFile, opts.IncludeIPv6)
-			if err != nil {
-				state.Warnings = append(state.Warnings, fmt.Sprintf("compose parse failed for %s: %v", composeFile, err))
-				continue
-			}
-			parsed = parsedNow
-		}
+		parsed := parsedByFile[composeFile]
 
 		state.ComposeEntries = append(state.ComposeEntries, parsed.Entries...)
 		for _, network := range parsed.Networks {
@@ -116,7 +108,6 @@ func discoverDocker(ctx context.Context, includeIPv6 bool) dockerDiscovery {
 		result.Networks = append(result.Networks, name)
 	}
 	result.Networks = dedupeStrings(result.Networks)
-	sort.Strings(result.Networks)
 
 	containers, err := cli.ContainerList(ctx, types.ContainerListOptions{All: true})
 	if err != nil {
@@ -149,38 +140,15 @@ func discoverDocker(ctx context.Context, includeIPv6 bool) dockerDiscovery {
 			}
 
 			if networkName == "host" {
-				result.Entries = append(result.Entries, IPEntry{
-					Network:       "host",
-					IP:            "host",
-					IPVersion:     0,
-					ContainerName: containerName,
-					Running:       running,
-					Source:        "docker",
-				})
+				result.Entries = appendDockerIPEntry(result.Entries, "host", "host", 0, containerName, running)
 				continue
 			}
-
 			if ipv4 := stripCIDR(endpoint.IPAddress); ipv4 != "" {
-				result.Entries = append(result.Entries, IPEntry{
-					Network:       networkName,
-					IP:            ipv4,
-					IPVersion:     4,
-					ContainerName: containerName,
-					Running:       running,
-					Source:        "docker",
-				})
+				result.Entries = appendDockerIPEntry(result.Entries, networkName, ipv4, 4, containerName, running)
 			}
-
 			if includeIPv6 {
 				if ipv6 := stripCIDR(endpoint.GlobalIPv6Address); ipv6 != "" {
-					result.Entries = append(result.Entries, IPEntry{
-						Network:       networkName,
-						IP:            ipv6,
-						IPVersion:     6,
-						ContainerName: containerName,
-						Running:       running,
-						Source:        "docker",
-					})
+					result.Entries = appendDockerIPEntry(result.Entries, networkName, ipv6, 6, containerName, running)
 				}
 			}
 		}
@@ -189,6 +157,17 @@ func discoverDocker(ctx context.Context, includeIPv6 bool) dockerDiscovery {
 	sortIPEntries(result.Entries)
 	result.Available = true
 	return result
+}
+
+func appendDockerIPEntry(entries []IPEntry, network, ip string, ipVersion int, containerName string, running bool) []IPEntry {
+	return append(entries, IPEntry{
+		Network:       network,
+		IP:            ip,
+		IPVersion:     ipVersion,
+		ContainerName: containerName,
+		Running:       running,
+		Source:        "docker",
+	})
 }
 
 func normalizeContainerName(names []string) string {

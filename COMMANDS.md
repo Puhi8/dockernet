@@ -76,7 +76,7 @@ Columns:
 
 Filters:
 1. `--running`
-2. `--compose-only`
+2. `--compose-only` (includes `source=compose` and `source=both`)
 3. `--network <name>`
 4. `--ip-prefix <x.y.z>`
 
@@ -140,6 +140,7 @@ Keep `KEY=value` format and extend:
 ```ini
 COMPOSE_ROOTS="/srv/compose,/home/luka/projects"
 ENABLE_IPV6="false"
+ENABLE_COLOR="true"
 GROUP_INFRA="192.168.1.1-192.168.1.254"
 GROUP_APPS="192.168.2.1-192.168.2.254"
 ```

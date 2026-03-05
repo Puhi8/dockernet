@@ -15,4 +15,4 @@ Global flags:
   -r, --root <paths>    Compose roots (comma-separated)
   -6, --ipv6            Include IPv6
   -j, --json            JSON output
-  -q, --quiet           Quiet mode
+  -q, --quiet           Hide discovery warnings

@@ -175,11 +175,7 @@ func ignoreRuleMatches(path, rule string) bool {
 	if filepath.IsAbs(rule) {
 		return path == rule || strings.HasPrefix(path, rule+sep)
 	}
-
-	if path == rule || strings.HasSuffix(path, sep+rule) || strings.Contains(path, sep+rule+sep) {
-		return true
-	}
-	return false
+	return (path == rule || strings.HasSuffix(path, sep+rule) || strings.Contains(path, sep+rule+sep))
 }
 
 func isComposeFile(path string) bool {

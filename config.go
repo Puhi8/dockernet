@@ -18,12 +18,14 @@ type Config struct {
 	ComposeRoots []string
 	IgnorePaths  []string
 	EnableIPv6   bool
+	EnableColor  bool
 	Groups       map[string]IPRange
 }
 
 func LoadConfig(path string) (*Config, error) {
 	cfg := &Config{
-		Groups: make(map[string]IPRange),
+		EnableColor: true,
+		Groups:      make(map[string]IPRange),
 	}
 
 	file, err := os.Open(path)
@@ -66,6 +68,12 @@ func LoadConfig(path string) (*Config, error) {
 				return nil, fmt.Errorf("invalid ENABLE_IPV6 value: %q", val)
 			}
 			cfg.EnableIPv6 = enabled
+		case key == "ENABLE_COLOR":
+			enabled, ok := parseBoolValue(val)
+			if !ok {
+				return nil, fmt.Errorf("invalid ENABLE_COLOR value: %q", val)
+			}
+			cfg.EnableColor = enabled
 		case strings.HasPrefix(key, "GROUP_"):
 			groupName := strings.TrimPrefix(key, "GROUP_")
 			if groupName == "" {
@@ -126,10 +134,6 @@ func parseIPRange(value string) (IPRange, bool) {
 	}
 
 	start, err := netip.ParseAddr(strings.TrimSpace(startRaw))
-	if err != nil {
-		return IPRange{}, false
-	}
-
 	end, err := netip.ParseAddr(strings.TrimSpace(endRaw))
 	if err != nil {
 		return IPRange{}, false

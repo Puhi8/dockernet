@@ -50,8 +50,6 @@ func parseComposeFile(path string, includeIPv6 bool) (composeParseResult, error)
 	if servicesNode == nil || servicesNode.Kind != yaml.MappingNode {
 		result.Networks = dedupeStrings(result.Networks)
 		result.VolumePaths = dedupeStrings(result.VolumePaths)
-		sort.Strings(result.Networks)
-		sort.Strings(result.VolumePaths)
 		return result, nil
 	}
 	result.IsCompose = true
@@ -72,38 +70,34 @@ func parseComposeFile(path string, includeIPv6 bool) (composeParseResult, error)
 			result.Networks = append(result.Networks, resolvedNetwork)
 
 			if networkRef.IPv4 != "" {
-				result.Entries = append(result.Entries, IPEntry{
-					Network:       resolvedNetwork,
-					IP:            networkRef.IPv4,
-					IPVersion:     4,
-					Service:       serviceName,
-					ContainerName: containerName,
-					Project:       project,
-					ComposeFile:   path,
-					Running:       false,
-					Source:        "compose",
-				})
+				result.Entries = appendComposeIPEntry(
+					result.Entries,
+					resolvedNetwork,
+					networkRef.IPv4,
+					4,
+					serviceName,
+					containerName,
+					project,
+					path,
+				)
 			}
 			if includeIPv6 && networkRef.IPv6 != "" {
-				result.Entries = append(result.Entries, IPEntry{
-					Network:       resolvedNetwork,
-					IP:            networkRef.IPv6,
-					IPVersion:     6,
-					Service:       serviceName,
-					ContainerName: containerName,
-					Project:       project,
-					ComposeFile:   path,
-					Running:       false,
-					Source:        "compose",
-				})
+				result.Entries = appendComposeIPEntry(
+					result.Entries,
+					resolvedNetwork,
+					networkRef.IPv6,
+					6,
+					serviceName,
+					containerName,
+					project,
+					path,
+				)
 			}
 		}
 	}
 
 	result.Networks = dedupeStrings(result.Networks)
 	result.VolumePaths = dedupeStrings(result.VolumePaths)
-	sort.Strings(result.Networks)
-	sort.Strings(result.VolumePaths)
 	sortIPEntries(result.Entries)
 
 	return result, nil
@@ -113,6 +107,20 @@ type serviceNetworkRef struct {
 	Name string
 	IPv4 string
 	IPv6 string
+}
+
+func appendComposeIPEntry(entries []IPEntry, network, ip string, ipVersion int, service, containerName, project, composeFile string) []IPEntry {
+	return append(entries, IPEntry{
+		Network:       network,
+		IP:            ip,
+		IPVersion:     ipVersion,
+		Service:       service,
+		ContainerName: containerName,
+		Project:       project,
+		ComposeFile:   composeFile,
+		Running:       false,
+		Source:        "compose",
+	})
 }
 
 func parseServiceNetworkRefs(serviceNode *yaml.Node) []serviceNetworkRef {

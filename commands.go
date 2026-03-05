@@ -115,18 +115,15 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 	emitDiscoveryWarnings(stderr, state, opts.Quiet, opts.JSON)
 
 	rows := buildPSRows(state.ComposeEntries, state.DockerEntries)
+	rows = resolveHostNetworkIPs(rows)
+	trimmedNetworkFilter := strings.TrimSpace(networkFilter)
+	trimmedIPPrefix := strings.TrimSpace(ipPrefix)
 	filteredRows := make([]IPEntry, 0, len(rows))
 	for _, row := range rows {
-		if strings.TrimSpace(networkFilter) != "" && row.Network != networkFilter {
-			continue
-		}
-		if strings.TrimSpace(ipPrefix) != "" && !strings.HasPrefix(row.IP, ipPrefix) {
-			continue
-		}
-		if runningOnly && !row.Running {
-			continue
-		}
-		if composeOnly && row.Source != "compose" {
+		if (trimmedNetworkFilter != "" && row.Network != trimmedNetworkFilter) ||
+			(trimmedIPPrefix != "" && !strings.HasPrefix(row.IP, trimmedIPPrefix)) ||
+			(runningOnly && !row.Running) ||
+			(composeOnly && row.Source != "compose" && row.Source != "both") {
 			continue
 		}
 		filteredRows = append(filteredRows, row)
@@ -153,25 +150,18 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 	} else {
 		rows := make([][]string, 0, len(filteredRows)+1)
 		rows = append(rows, []string{
-			colorize(stdout, ansiCyan, "container/service"),
-			colorize(stdout, ansiCyan, "network"),
-			colorize(stdout, ansiCyan, "ip"),
-			colorize(stdout, ansiCyan, "running"),
-			colorize(stdout, ansiCyan, "source"),
+			colorize(stdout, ansiCyan, "CONTAINER"),
+			colorize(stdout, ansiCyan, "NETWORK"),
+			colorize(stdout, ansiCyan, "IP"),
+			colorize(stdout, ansiCyan, "RUNNING"),
+			colorize(stdout, ansiCyan, "SOURCE"),
 		})
 
 		for _, row := range filteredRows {
-			name := strings.TrimSpace(row.ContainerName)
-			if name == "" {
-				name = strings.TrimSpace(row.Service)
-			}
-			if name == "" {
-				name = "-"
-			}
 			rows = append(rows, []string{
-				colorize(stdout, ansiBlue, name),
+				colorize(stdout, ansiBlue, psEntryName(row)),
 				row.Network,
-				colorize(stdout, ansiYellow, row.IP),
+				psIPLabel(stdout, row.Network, row.IP),
 				runningLabel(stdout, row.Running),
 				sourceLabel(stdout, row.Source),
 			})
@@ -214,8 +204,6 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 	}
 	emitDiscoveryWarnings(stderr, state, opts.Quiet, opts.JSON)
 
-	// For conflict detection, default scope should cover all discovered networks.
-	// Configured network filters can hide real collisions and make "check" misleading.
 	scopeNetworks := resolveScopedNetworks(networkFilter, nil, state.Networks, false)
 	scopeSet := make(map[string]struct{}, len(scopeNetworks))
 	for _, network := range scopeNetworks {
@@ -328,15 +316,10 @@ func runFree(ctx context.Context, opts runtimeOptions, args []string, stdout, st
 			notEnough = true
 		}
 
-		ipStrings := make([]string, 0, len(candidates))
-		for _, addr := range candidates {
-			ipStrings = append(ipStrings, addr.String())
-		}
-
 		rows = append(rows, freeResultRow{
 			Group:   groupName,
 			Network: network,
-			IPs:     compressIPv4RangeStrings(ipStrings),
+			IPs:     compressIPv4RangeStrings(addrStrings(candidates)),
 		})
 	}
 
@@ -466,15 +449,10 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 				notEnoughGroups[currentGroup] = struct{}{}
 			}
 
-			ipStrings := make([]string, 0, len(candidates))
-			for _, addr := range candidates {
-				ipStrings = append(ipStrings, addr.String())
-			}
-
 			rows = append(rows, freeResultRow{
 				Group:   currentGroup,
 				Network: network,
-				IPs:     ipStrings,
+				IPs:     addrStrings(candidates),
 			})
 		}
 	}
@@ -521,9 +499,9 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 	} else {
 		table := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintf(table, "%s\t%s\t%s\n",
-			colorize(stdout, ansiCyan, "group"),
-			colorize(stdout, ansiCyan, "network"),
-			colorize(stdout, ansiCyan, "next_free"),
+			colorize(stdout, ansiCyan, "GROUP"),
+			colorize(stdout, ansiCyan, "NETWORK"),
+			colorize(stdout, ansiCyan, "NEXT_FREE"),
 		)
 		for _, row := range rows {
 			nextValue := "-"

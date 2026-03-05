@@ -16,7 +16,16 @@ func runHelp(w io.Writer, args []string) {
 		return
 	}
 
-	name := normalizeHelpName(args[0])
+	var name string
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "":
+		name = "main"
+	case "nextfree", "next_free", "next-free":
+		name = "nextfree"
+	default:
+		name = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+
 	switch name {
 	case "main", "check", "ls", "ps", "free", "nextfree", "sections":
 		writeHelpMenu(w, name)
@@ -28,26 +37,18 @@ func runHelp(w io.Writer, args []string) {
 }
 
 func writeHelpMenu(w io.Writer, name string) {
-	menu, err := readHelpMenu(name)
+	path := "help.txt/" + name + ".txt"
+	data, err := helpMenus.ReadFile(path)
 	if err != nil {
 		fmt.Fprintln(w, warningLine(w, fmt.Sprintf("help topic %q not found", name)))
 		return
 	}
-	fmt.Fprintln(w, menu)
-}
-
-func readHelpMenu(name string) (string, error) {
-	path := "help.txt/" + name + ".txt"
-	data, err := helpMenus.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-
 	menu := strings.TrimSpace(string(data))
 	if menu == "" {
-		return "", fmt.Errorf("empty help menu %q", name)
+		fmt.Fprintln(w, warningLine(w, fmt.Sprintf("empty help menu %q", name)))
+		return
 	}
-	return menu, nil
+	fmt.Fprintln(w, menu)
 }
 
 func hasHelpArg(args []string) bool {
@@ -58,15 +59,4 @@ func hasHelpArg(args []string) bool {
 		}
 	}
 	return false
-}
-
-func normalizeHelpName(name string) string {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "":
-		return "main"
-	case "nextfree", "next_free", "next-free":
-		return "nextfree"
-	default:
-		return strings.ToLower(strings.TrimSpace(name))
-	}
 }

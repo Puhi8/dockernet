@@ -12,8 +12,7 @@ import (
 )
 
 const (
-	schemaVersion = "1"
-
+	schemaVersion    = "1"
 	exitCodeOK       = 0
 	exitCodeRuntime  = 1
 	exitCodeConflict = 2
@@ -42,6 +41,7 @@ type runtimeOptions struct {
 	ConfigPath   string
 	ComposeRoots []string
 	IncludeIPv6  bool
+	EnableColor  bool
 	JSON         bool
 	Quiet        bool
 	Networks     []string
@@ -123,6 +123,7 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return exitCodeRuntime, err
 	}
+	setColorEnabled(opts.EnableColor)
 
 	switch globals.Command {
 	case "ls":
@@ -228,6 +229,12 @@ func buildRuntimeOptions(globals parsedGlobalFlags, cfg *Config, configPath stri
 		return runtimeOptions{}, fmt.Errorf("parse DOCKERNET_IPV6: %w", err)
 	}
 	opts.IncludeIPv6 = ipv6
+
+	enableColor, err := resolveBoolOption(false, false, "DOCKERNET_COLOR", cfg.EnableColor)
+	if err != nil {
+		return runtimeOptions{}, fmt.Errorf("parse DOCKERNET_COLOR: %w", err)
+	}
+	opts.EnableColor = enableColor
 
 	jsonOutput, err := resolveBoolOption(globals.JSONSet, globals.JSON, "DOCKERNET_JSON", false)
 	if err != nil {
