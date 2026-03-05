@@ -58,4 +58,4 @@ Environment overrides (higher priority than config):
 
 ## Build
 
-CGO_ENABLED=0 go build -ldflags="-s -w"
+CGO_ENABLED=0 go build -ldflags="-s -w" ./cmd/dockernet
