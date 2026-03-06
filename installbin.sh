@@ -17,24 +17,24 @@ require_cmd() {
 
 resolve_latest_version() {
     local version=""
-
+    
     if command -v gh >/dev/null 2>&1; then
         version="$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || true)"
     fi
-
+    
     if [[ -z "$version" ]]; then
         version="$(
             curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-                | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
-                | head -n1
+            | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -n1
         )"
     fi
-
+    
     if [[ -z "$version" ]]; then
         echo "Could not determine latest release for $REPO."
         exit 1
     fi
-
+    
     printf '%s\n' "$version"
 }
 
@@ -45,7 +45,7 @@ detect_os() {
         *)
             echo "Unsupported OS: $(uname -s)"
             exit 1
-            ;;
+        ;;
     esac
 }
 
@@ -56,7 +56,7 @@ detect_arch() {
         *)
             echo "Unsupported architecture: $(uname -m)"
             exit 1
-            ;;
+        ;;
     esac
 }
 
@@ -65,7 +65,6 @@ require_cmd tar
 require_cmd install
 
 if [[ "$REQUESTED_VERSION" == "latest" ]]; then
-    echo "Detecting latest version..."
     VERSION="$(resolve_latest_version)"
 else
     VERSION="$REQUESTED_VERSION"
@@ -86,15 +85,14 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 ARCHIVE_PATH="$TMP_DIR/$ARCHIVE_NAME"
 CHECKSUMS_PATH="$TMP_DIR/checksums.txt"
 
-echo "Downloading $ARCHIVE_URL..."
+echo "Downloading $ARCHIVE_URL"
 curl -fL --retry 3 --retry-delay 1 -o "$ARCHIVE_PATH" "$ARCHIVE_URL"
 curl -fL --retry 3 --retry-delay 1 -o "$CHECKSUMS_PATH" "$CHECKSUMS_URL"
 
-echo "Verifying checksum..."
 EXPECTED_SUM="$(
     awk -v f="$ARCHIVE_NAME" \
-        '$2==f || $2==("./" f) || $NF==f || $NF==("./" f) {print $1; exit}' \
-        "$CHECKSUMS_PATH"
+    '$2==f || $2==("./" f) || $NF==f || $NF==("./" f) {print $1; exit}' \
+    "$CHECKSUMS_PATH"
 )"
 
 if [[ -z "$EXPECTED_SUM" ]]; then
@@ -114,7 +112,6 @@ if [[ "$EXPECTED_SUM" != "$ACTUAL_SUM" ]]; then
     exit 1
 fi
 
-echo "Extracting $ARCHIVE_NAME..."
 tar -xzf "$ARCHIVE_PATH" -C "$TMP_DIR"
 
 SOURCE_BIN="$TMP_DIR/$BINARY_NAME"
@@ -132,7 +129,7 @@ else
     [[ -w "$PARENT_DIR" ]] || NEED_SUDO=1
 fi
 
-echo "Installing to $INSTALL_PATH..."
+echo "Installing to $INSTALL_PATH"
 if [[ "$NEED_SUDO" -eq 1 ]]; then
     require_cmd sudo
     sudo mkdir -p "$INSTALL_DIR"
@@ -142,8 +139,8 @@ else
     install -m 0755 "$SOURCE_BIN" "$INSTALL_PATH"
 fi
 
-if [[ ! -f "$CONFIG_PATH" ]]; then
-    echo "Creating default config at $CONFIG_PATH..."
+if [[ ! -e "$CONFIG_PATH" ]]; then
+    echo "Creating default config at $CONFIG_PATH"
     mkdir -p "$(dirname "$CONFIG_PATH")"
     curl -fL --retry 3 --retry-delay 1 -o "$CONFIG_PATH" "$CONFIG_URL"
 else
@@ -151,4 +148,3 @@ else
 fi
 
 echo "Installed $APP $VERSION"
-echo "Try: $APP ls"
