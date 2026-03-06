@@ -1,5 +1,9 @@
 Usage:
-  dockernet [global flags] check [-g|--group <name>] [-n|--network <name>]
+  dockernet [global flags] check [flags]
+
+Flags:
+  -g --group <name>    only check containers in group
+  -n --network <name>  only check containers on network
 
 Checks:
   - duplicate static IPs in compose files

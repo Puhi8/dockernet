@@ -1,53 +1,82 @@
-# dockernet (Extended Go Edition)
+# dockernet
 
-Self-contained Docker network IP management tool.
+Docker + Compose IP discovery, conflict checks, and free IP allocation for self-hosted environments.
 
 ## Features
 
-- Auto-discovers Docker + Compose network usage
-- Supports `.yml` and `.yaml` compose files
-- Follows symlinks while scanning compose roots
-- Parses `.env` alongside compose files (process env has precedence)
-- Includes running and non-running containers in `ps`
-- `ps --compose-only` includes `source=compose` and `source=both`
-- Configurable colored output (`ENABLE_COLOR` / `DOCKERNET_COLOR`)
-- Supports JSON output with `schema_version`
+- Discovers IP usage from Docker runtime and Compose files
+- Detects duplicate/static-IP conflicts
+- Finds next-free addresses from configured IP groups / ranges
+- Falls back to compose-only mode when Docker is unavailable
+- JSON output (`--json`)
 
-## Usage
+## Build
+Requires: Go `1.24+` (for building from source)
 
-Global flags:
+```bash
+# Build binary
+go build -o dockernet .
 
-- `-c, --config <path>`
-- `-r, --root <path[,path...]>`
-- `-6, --ipv6`
-- `-j, --json`
-- `-q, --quiet`
+# Create config
+cp dockernet.conf.example ~/.dockernet.conf
+```
 
-Commands:
 
-- `dockernet ls`
-- `dockernet ps [--running] [--compose-only] [--network <name>] [--ip-prefix <x.y.z>]`
-- `dockernet check [--group <name>] [--network <name>]`
-- `dockernet free --group <name> [--network <name>] [--limit <n>]`
-- `dockernet nextFree [--group <name>] [--network <name>] [count]`
-- `dockernet sections [--validate] [--edit] [--path]`
+for static/minimized build:
 
-## Config
+```bash
+CGO_ENABLED=0 go build -ldflags="-s -w" -o dockernet .
+```
 
-Example `~/.dockernet.conf`:
+## Examples
+
+```bash
+# List running entries in bridge network
+dockernet ps --running --network bridge
+
+# Check conflicts only in one network
+dockernet check --network bridge
+
+# Get next 3 free IPs for all groups
+dockernet nextFree 3
+
+# Get exactly 1 free IP
+dockernet nextFree 1
+
+# Validate group overlaps/ranges
+dockernet sections --validate
+```
+
+## Configuration
+
+Default config path:
+
+- `$DOCKERNET_CONFIG` if set
+- otherwise `~/.dockernet.conf`
+
+Example config (in `dockernet.conf.example`):
 
 ```ini
 NETWORKS="bridge,host"
-COMPOSE_ROOTS="/srv/compose,/home/luka/projects"
+COMPOSE_ROOTS="/var/composeFiles,/home/username/projects"
 IGNORE_PATHS="node_modules,.git,volumes,data"
 ENABLE_IPV6="false"
 ENABLE_COLOR="true"
 
-GROUP_INFRA="192.168.1.1-192.168.1.254"
-GROUP_APPS="192.168.2.1-192.168.2.254"
+GROUP_INFRA="172.18.1.1-172.18.1.254"
+GROUP_APPS="172.18.2.1-172.18.2.254"
 ```
 
-Environment overrides (higher priority than config):
+Config keys:
+
+- `NETWORKS` comma-separated network scope (host is list-only)
+- `COMPOSE_ROOTS` comma-separated compose scan roots
+- `IGNORE_PATHS` path ignored during compose discovery
+- `ENABLE_IPV6` enable IPv6 discovery and checks
+- `ENABLE_COLOR` enable colorized terminal output
+- `GROUP_<NAME>` allocation/check range in full form (`a.b.c.d-a.b.c.d`)
+
+Config values can be overridden with environment variables:
 
 - `DOCKERNET_CONFIG`
 - `DOCKERNET_ROOTS`
@@ -56,6 +85,16 @@ Environment overrides (higher priority than config):
 - `DOCKERNET_JSON`
 - `DOCKERNET_QUIET`
 
-## Build
+## Output And Exit Codes
 
-CGO_ENABLED=0 go build -ldflags="-s -w" ./cmd/dockernet
+Output modes:
+
+- Plain text (default)
+- JSON (`--json`)
+
+Exit codes:
+
+- `0` success
+- `1` runtime/config error
+- `2` conflicts found (`check`)
+- `3` degraded compose-only mode (Docker unavailable)

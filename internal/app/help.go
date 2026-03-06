@@ -27,7 +27,7 @@ func runHelp(w io.Writer, args []string) {
 	}
 
 	switch name {
-	case "main", "check", "ls", "ps", "free", "nextfree", "sections":
+	case "main", "check", "ls", "ps", "nextfree", "sections":
 		writeHelpMenu(w, name)
 	default:
 		fmt.Fprintln(w, warningLine(w, fmt.Sprintf("unknown help topic %q", args[0])))

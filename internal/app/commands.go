@@ -68,13 +68,30 @@ func runLS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 			return exitCodeRuntime, err
 		}
 	} else {
-		fmt.Fprintf(stdout, "networks: %s\n", strings.Join(state.Networks, ","))
-		fmt.Fprintf(stdout, "compose_files: %d\n", len(state.ComposeFiles))
-		for _, file := range state.ComposeFiles {
-			fmt.Fprintf(stdout, "  %s\n", file)
+		networkLabels := make([]string, 0, len(state.Networks))
+		for _, network := range state.Networks {
+			networkLabels = append(networkLabels, colorize(stdout, ansiCyan, network))
 		}
-		fmt.Fprintf(stdout, "static_ips: %d\n", len(state.ComposeEntries))
-		fmt.Fprintf(stdout, "running_ips: %d\n", runningCount)
+
+		fmt.Fprintf(stdout, "%s %s\n",
+			colorize(stdout, ansiBlue, "networks:"),
+			strings.Join(networkLabels, ", "),
+		)
+		fmt.Fprintf(stdout, "%s %s\n",
+			colorize(stdout, ansiBlue, "compose_files:"),
+			colorize(stdout, ansiGreen, strconv.Itoa(len(state.ComposeFiles))),
+		)
+		for _, file := range state.ComposeFiles {
+			fmt.Fprintf(stdout, "  %s\n", colorize(stdout, ansiGray, file))
+		}
+		fmt.Fprintf(stdout, "%s %s\n",
+			colorize(stdout, ansiBlue, "static_ips:"),
+			colorize(stdout, ansiGreen, strconv.Itoa(len(state.ComposeEntries))),
+		)
+		fmt.Fprintf(stdout, "%s %s\n",
+			colorize(stdout, ansiBlue, "running_ips:"),
+			colorize(stdout, ansiGreen, strconv.Itoa(runningCount)),
+		)
 	}
 
 	if state.Degraded {
@@ -262,119 +279,6 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 	return exitCodeOK, nil
 }
 
-func runFree(ctx context.Context, opts runtimeOptions, args []string, stdout, stderr io.Writer) (int, error) {
-	if hasHelpArg(args) {
-		runHelp(stdout, []string{"free"})
-		return exitCodeOK, nil
-	}
-
-	flagSet := flag.NewFlagSet("free", flag.ContinueOnError)
-	flagSet.SetOutput(io.Discard)
-
-	var groupName string
-	var networkFilter string
-	var limit int
-	addFlag(flagSet, &groupName, "g", "group", "", "group name")
-	addFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
-	addFlag(flagSet, &limit, "l", "limit", 1, "number of free addresses to return")
-
-	if err := flagSet.Parse(args); err != nil {
-		return exitCodeRuntime, err
-	}
-	if len(flagSet.Args()) > 0 {
-		return exitCodeRuntime, fmt.Errorf("unexpected args for free: %v", flagSet.Args())
-	}
-	if strings.TrimSpace(groupName) == "" {
-		return exitCodeRuntime, errors.New("free requires --group")
-	}
-	if limit <= 0 {
-		return exitCodeRuntime, errors.New("--limit must be > 0")
-	}
-
-	groupRange, ok := opts.Groups[groupName]
-	if !ok {
-		return exitCodeRuntime, fmt.Errorf("group %q not found", groupName)
-	}
-
-	state, err := discoverState(ctx, opts)
-	if err != nil {
-		return exitCodeRuntime, err
-	}
-	emitDiscoveryWarnings(stderr, state, opts.Quiet, opts.JSON)
-
-	scopeNetworks := resolveScopedNetworks(networkFilter, opts.Networks, state.Networks, false)
-	if len(scopeNetworks) == 0 {
-		return exitCodeRuntime, errors.New("no networks available for allocation")
-	}
-
-	usedByNetwork := buildUsedIPv4ByNetwork(state.ComposeEntries, state.DockerEntries)
-	rows := make([]freeResultRow, 0, len(scopeNetworks))
-	notEnough := false
-	for _, network := range scopeNetworks {
-		candidates := collectFreeAddresses(groupRange, usedByNetwork[network], limit)
-		if len(candidates) < limit {
-			notEnough = true
-		}
-
-		rows = append(rows, freeResultRow{
-			Group:   groupName,
-			Network: network,
-			IPs:     compressIPv4RangeStrings(addrStrings(candidates)),
-		})
-	}
-
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Group != rows[j].Group {
-			return rows[i].Group < rows[j].Group
-		}
-		return rows[i].Network < rows[j].Network
-	})
-
-	if opts.JSON {
-		warnings := append([]string(nil), state.Warnings...)
-		if notEnough {
-			warnings = append(warnings, "not enough space")
-		}
-		payload := struct {
-			SchemaVersion string          `json:"schema_version"`
-			Command       string          `json:"command"`
-			ComposeOnly   bool            `json:"compose_only"`
-			Warnings      []string        `json:"warnings,omitempty"`
-			Results       []freeResultRow `json:"results"`
-		}{
-			SchemaVersion: schemaVersion,
-			Command:       "free",
-			ComposeOnly:   state.Degraded,
-			Warnings:      warnings,
-			Results:       rows,
-		}
-		if err := writeJSON(stdout, payload); err != nil {
-			return exitCodeRuntime, err
-		}
-	} else {
-		table := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(table, "group\tnetwork\tfree")
-		for _, row := range rows {
-			freeValue := "-"
-			if len(row.IPs) > 0 {
-				freeValue = strings.Join(row.IPs, ", ")
-			}
-			fmt.Fprintf(table, "%s\t%s\t%s\n", row.Group, row.Network, freeValue)
-		}
-		if err := table.Flush(); err != nil {
-			return exitCodeRuntime, err
-		}
-		if notEnough {
-			fmt.Fprintln(stderr, warningLine(stderr, "not enough space"))
-		}
-	}
-
-	if state.Degraded {
-		return exitCodeDegraded, nil
-	}
-	return exitCodeOK, nil
-}
-
 func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout, stderr io.Writer) (int, error) {
 	if hasHelpArg(args) {
 		runHelp(stdout, []string{"nextFree"})
@@ -401,12 +305,12 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 		if err != nil {
 			return exitCodeRuntime, fmt.Errorf("invalid nextFree count %q", positionals[0])
 		}
-		if parsedCount <= 0 {
-			return exitCodeRuntime, errors.New("nextFree count must be > 0")
-		}
 		count = parsedCount
 	default:
 		return exitCodeRuntime, fmt.Errorf("unexpected args for nextFree: %v", positionals)
+	}
+	if count <= 0 {
+		return exitCodeRuntime, errors.New("nextFree count must be > 0")
 	}
 
 	groupNames := make([]string, 0)
@@ -471,7 +375,7 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 	sort.Strings(notEnoughGroupList)
 
 	notEnoughWarning := "not enough space"
-	if len(notEnoughGroupList) > 0 {
+	if len(notEnoughGroupList) > 0 && len(groupNames) > 1 {
 		notEnoughWarning = fmt.Sprintf("not enough space: %s", strings.Join(notEnoughGroupList, ", "))
 	}
 

@@ -132,8 +132,6 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 		return runPS(context.Background(), opts, globals.CommandArgs, stdout, stderr)
 	case "check":
 		return runCheck(context.Background(), opts, globals.CommandArgs, stdout, stderr)
-	case "free":
-		return runFree(context.Background(), opts, globals.CommandArgs, stdout, stderr)
 	case "nextFree", "nextfree":
 		return runNextFree(context.Background(), opts, globals.CommandArgs, stdout, stderr)
 	case "sections":

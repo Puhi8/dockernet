@@ -1,5 +1,5 @@
 Usage:
-  dockernet [global flags] sections [-v|--validate] [-e|--edit] [-p|--path]
+  dockernet [global flags] sections [flags]
 
 Flags:
   -v, --validate   Validate group overlap/range issues

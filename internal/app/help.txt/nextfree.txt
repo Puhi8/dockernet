@@ -1,4 +1,8 @@
 Usage:
-  dockernet [global flags] nextFree|nextfree [-g|--group <name>] [-n|--network <name>] [count]
+  dockernet [global flags] nextfree [flags] [count]
 
-Returns next free IPs for one or all groups.
+Flags:
+  -g --group <name>    limit allocation to a group
+  -n --network <name>  limit allocation to a network
+
+Returns free IPs for one group or all groups. Default count is 2.

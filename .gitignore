@@ -5,6 +5,7 @@ dockernet
 *.test
 template.yaml
 template.yml
+COMMANDS.md
 
 coverage.out
 *.coverprofile

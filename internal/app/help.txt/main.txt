@@ -2,11 +2,10 @@ Usage:
   dockernet [global flags] <command> [command flags]
 
 Commands:
-  check       Detect conflicts in static IP assignments
-  free        Show free addresses for a group
-  nextFree    Show next N free addresses
-  ps          List compose/docker IP entries
   ls          Show discovery summary
+  ps          List compose/docker containers and their IP entries
+  check       Detect conflicts in static IP assignments
+  nextFree    Show next free addresses (default count=2)
   sections    Show or edit configured groups
   help        Show this help or command help
 
