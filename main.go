@@ -2,7 +2,8 @@ package main
 
 import (
 	"os"
-	"dockernet/internal/app"
+
+	"github.com/Puhi8/dockernet/internal/app"
 )
 
 func main() {

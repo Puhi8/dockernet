@@ -10,6 +10,33 @@ Docker + Compose IP discovery, conflict checks, and free IP allocation for self-
 - Falls back to compose-only mode when Docker is unavailable
 - JSON output (`--json`)
 
+## Install
+
+### Prebuilt binary (Linux/macOS)
+```bash
+curl -fsSL https://raw.githubusercontent.com/Puhi8/dockernet/main/installbin.sh | bash
+```
+
+### Go install
+Requires: Go `1.24+`
+
+```bash
+go install github.com/Puhi8/dockernet@latest
+
+# Ensure Go bin is in PATH (if not already)
+export PATH="$PATH:$(go env GOPATH)/bin"
+
+# Optional: create default config
+curl -fsSL https://raw.githubusercontent.com/Puhi8/dockernet/main/dockernet.conf.example -o ~/.dockernet.conf
+```
+
+For reproducible installs, pin a tag instead of `latest`:
+
+```bash
+go install github.com/Puhi8/dockernet@v1.0.0
+```
+
+
 ## Build
 Requires: Go `1.24+` (for building from source)
 
@@ -20,7 +47,6 @@ go build -o dockernet .
 # Create config
 cp dockernet.conf.example ~/.dockernet.conf
 ```
-
 
 for static/minimized build:
 
