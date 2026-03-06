@@ -1,0 +1,17 @@
+Usage:
+  dockernet [global flags] <command> [command flags]
+
+Commands:
+  ls          Show discovery summary
+  ps          List compose/docker containers and their IP entries
+  check       Detect conflicts in static IP assignments
+  nextFree    Show next free addresses (default count=2)
+  sections    Show or edit configured groups
+  help        Show this help or command help
+
+Global flags:
+  -c, --config <path>   Config file path
+  -r, --root <paths>    Compose roots (comma-separated)
+  -6, --ipv6            Include IPv6
+  -j, --json            JSON output
+  -q, --quiet           Hide discovery warnings

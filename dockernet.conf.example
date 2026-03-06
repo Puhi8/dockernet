@@ -1,0 +1,8 @@
+NETWORKS="bridge,host"
+COMPOSE_ROOTS="/var/composeFiles,/home/username/projects"
+IGNORE_PATHS="node_modules,.git,volumes,data"
+ENABLE_IPV6="false"
+ENABLE_COLOR="true"
+
+GROUP_INFRA="172.18.1.1-172.18.1.254"
+GROUP_APPS="172.18.2.1-172.18.2.254"

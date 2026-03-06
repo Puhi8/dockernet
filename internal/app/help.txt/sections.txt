@@ -1,0 +1,7 @@
+Usage:
+  dockernet [global flags] sections [flags]
+
+Flags:
+  -v, --validate   Validate group overlap/range issues
+  -e, --edit       Open config in $EDITOR
+  -p, --path       Print active config file path

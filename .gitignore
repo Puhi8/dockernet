@@ -1,0 +1,17 @@
+docker/
+dockernet
+*.exe
+*.out
+*.test
+template.yaml
+template.yml
+COMMANDS.md
+
+coverage.out
+*.coverprofile
+.dockernet.conf
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
