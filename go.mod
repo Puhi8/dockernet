@@ -1,4 +1,4 @@
-module dockernet
+module github.com/Puhi8/dockernet
 
 go 1.24.0
 
