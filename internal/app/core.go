@@ -47,6 +47,7 @@ type runtimeOptions struct {
 	Networks     []string
 	IgnorePaths  []string
 	Groups       map[string]IPRange
+	GroupOrder   []string
 }
 
 type IPEntry struct {
@@ -214,6 +215,7 @@ func buildRuntimeOptions(globals parsedGlobalFlags, cfg *Config, configPath stri
 		Networks:    dedupeStrings(cfg.Networks),
 		IgnorePaths: append([]string(nil), cfg.IgnorePaths...),
 		Groups:      cfg.Groups,
+		GroupOrder:  append([]string(nil), cfg.GroupOrder...),
 	}
 
 	composeRoots, err := resolveComposeRoots(globals, cfg)

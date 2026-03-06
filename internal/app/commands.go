@@ -320,10 +320,7 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 		}
 		groupNames = append(groupNames, groupName)
 	} else {
-		for name := range opts.Groups {
-			groupNames = append(groupNames, name)
-		}
-		sort.Strings(groupNames)
+		groupNames = orderedGroupNames(opts.Groups, opts.GroupOrder)
 	}
 	if len(groupNames) == 0 {
 		return exitCodeRuntime, errors.New("no groups configured")
@@ -360,13 +357,6 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 			})
 		}
 	}
-
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Group != rows[j].Group {
-			return rows[i].Group < rows[j].Group
-		}
-		return rows[i].Network < rows[j].Network
-	})
 
 	notEnoughGroupList := make([]string, 0, len(notEnoughGroups))
 	for group := range notEnoughGroups {
@@ -434,6 +424,35 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 		return exitCodeDegraded, nil
 	}
 	return exitCodeOK, nil
+}
+
+func orderedGroupNames(groups map[string]IPRange, configOrder []string) []string {
+	if len(groups) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(groups))
+	ordered := make([]string, 0, len(groups))
+	for _, name := range configOrder {
+		_, ok := groups[name]
+		_, exists := seen[name]
+		if !ok || exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		ordered = append(ordered, name)
+	}
+
+	extras := make([]string, 0, len(groups)-len(ordered))
+	for name := range groups {
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		extras = append(extras, name)
+	}
+	sort.Strings(extras)
+
+	return append(ordered, extras...)
 }
 
 func runSections(opts runtimeOptions, args []string, stdout, stderr io.Writer) (int, error) {

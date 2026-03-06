@@ -20,6 +20,7 @@ type Config struct {
 	EnableIPv6   bool
 	EnableColor  bool
 	Groups       map[string]IPRange
+	GroupOrder   []string
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -83,6 +84,9 @@ func LoadConfig(path string) (*Config, error) {
 			ipRange, ok := parseIPRange(val)
 			if !ok {
 				return nil, fmt.Errorf("invalid range for %s: %q", key, val)
+			}
+			if _, exists := cfg.Groups[groupName]; !exists {
+				cfg.GroupOrder = append(cfg.GroupOrder, groupName)
 			}
 			cfg.Groups[groupName] = ipRange
 		}
