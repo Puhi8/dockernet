@@ -542,12 +542,20 @@ func runSections(opts runtimeOptions, args []string, stdout, stderr io.Writer) (
 			return exitCodeRuntime, err
 		}
 	} else {
-		table := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(table, "section\tstart\tend")
+		rows := make([][]string, 0, len(groupRows)+1)
+		rows = append(rows, []string{
+			colorize(stdout, ansiCyan, "SECTION"),
+			colorize(stdout, ansiCyan, "START"),
+			colorize(stdout, ansiCyan, "END"),
+		})
 		for _, row := range groupRows {
-			fmt.Fprintf(table, "%s\t%s\t%s\n", row.Name, row.Start, row.End)
+			rows = append(rows, []string{
+				colorize(stdout, ansiBlue, row.Name),
+				colorize(stdout, ansiYellow, row.Start),
+				colorize(stdout, ansiGreen, row.End),
+			})
 		}
-		if err := table.Flush(); err != nil {
+		if err := printAlignedRows(stdout, rows); err != nil {
 			return exitCodeRuntime, err
 		}
 		for _, validationError := range validationErrors {
