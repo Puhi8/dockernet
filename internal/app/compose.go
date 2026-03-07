@@ -240,10 +240,8 @@ func interpolateComposeEnv(data string, dotenv map[string]string) string {
 		if ok && strings.TrimSpace(value) != "" {
 			return value
 		}
-		if !ok {
-			if dot := dotenv[name]; strings.TrimSpace(dot) != "" {
-				return dot
-			}
+		if dot := dotenv[name]; strings.TrimSpace(dot) != "" && !ok {
+			return dot
 		}
 		if strings.TrimSpace(value) == "" && strings.TrimSpace(dotenv[name]) != "" {
 			return dotenv[name]
@@ -322,10 +320,7 @@ func yamlMapPairs(node *yaml.Node) map[string]*yaml.Node {
 }
 
 func yamlScalar(node *yaml.Node) string {
-	if node == nil {
-		return ""
-	}
-	if node.Kind == yaml.ScalarNode {
+	if node != nil && node.Kind == yaml.ScalarNode {
 		return strings.TrimSpace(node.Value)
 	}
 	return ""
@@ -369,11 +364,7 @@ func parseScalarVolumeHostPath(raw, composeDir string) string {
 func parseMappingVolumeHostPath(node *yaml.Node, composeDir string) string {
 	volumeType := strings.ToLower(strings.TrimSpace(yamlScalar(yamlMapLookup(node, "type"))))
 	source := strings.TrimSpace(yamlScalar(yamlMapLookup(node, "source")))
-	if source == "" {
-		return ""
-	}
-
-	if volumeType != "" && volumeType != "bind" {
+	if (volumeType != "" && volumeType != "bind") || source == "" {
 		return ""
 	}
 	return resolveBindSourcePath(source, composeDir)
@@ -435,10 +426,7 @@ func normalizeValidIP(raw string, version int) string {
 		return ""
 	}
 
-	if version == 4 && !addr.Is4() {
-		return ""
-	}
-	if version == 6 && !addr.Is6() {
+	if (version == 4 && !addr.Is4()) || (version == 6 && !addr.Is6()) {
 		return ""
 	}
 	return addr.String()

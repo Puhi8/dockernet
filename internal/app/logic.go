@@ -135,10 +135,7 @@ func composeManagedPrefixes(entry IPEntry) []string {
 	if project == "" || service == "" {
 		return nil
 	}
-	return []string{
-		project + "-" + service + "-",
-		project + "_" + service + "_",
-	}
+	return []string{project + "-" + service + "-", project + "_" + service + "_"}
 }
 
 func firstUnmatchedDockerIndex(candidates []int, matched []bool) int {
@@ -155,11 +152,11 @@ func dedupePSRows(rows []IPEntry) []IPEntry {
 		return nil
 	}
 
-	// If we already have a merged "both" row for a service/network/ip, skip compose-only duplicates.
+	// If we already have a merged "both" row for the same compose identity/network/ip, skip compose-only duplicates.
 	mergedKeys := make(map[string]struct{})
 	for _, row := range rows {
 		if row.Source == "both" {
-			mergedKeys[psServiceKey(row)] = struct{}{}
+			mergedKeys[psComposeKey(row)] = struct{}{}
 		}
 	}
 
@@ -167,7 +164,7 @@ func dedupePSRows(rows []IPEntry) []IPEntry {
 	deduped := make([]IPEntry, 0, len(rows))
 	for _, row := range rows {
 		if row.Source == "compose" {
-			if _, exists := mergedKeys[psServiceKey(row)]; exists {
+			if _, exists := mergedKeys[psComposeKey(row)]; exists {
 				continue
 			}
 		}
@@ -181,8 +178,28 @@ func dedupePSRows(rows []IPEntry) []IPEntry {
 	return deduped
 }
 
-func psServiceKey(entry IPEntry) string {
-	return fmt.Sprintf("%s|%d|%s|%s", entry.Network, entry.IPVersion, entry.IP, strings.TrimSpace(entry.Service))
+func psComposeKey(entry IPEntry) string {
+	return fmt.Sprintf("%s|%d|%s|%s", entry.Network, entry.IPVersion, entry.IP, psComposeIdentity(entry))
+}
+
+func psComposeIdentity(entry IPEntry) string {
+	service := strings.TrimSpace(entry.Service)
+	project := strings.TrimSpace(entry.Project)
+	composeFile := strings.TrimSpace(entry.ComposeFile)
+	switch {
+	case project != "" && service != "":
+		return "project:" + project + "|service:" + service
+	case service != "" && composeFile != "":
+		return "service:" + service + "|file:" + composeFile
+	case service != "":
+		return "service:" + service
+	case composeFile != "":
+		return "file:" + composeFile
+	}
+	if containerName := strings.TrimSpace(entry.ContainerName); containerName != "" {
+		return "container:" + containerName
+	}
+	return "-"
 }
 
 func psDisplayKey(entry IPEntry) string {
@@ -190,7 +207,17 @@ func psDisplayKey(entry IPEntry) string {
 	if name == "" {
 		name = strings.TrimSpace(entry.Service)
 	}
-	return fmt.Sprintf("%s|%d|%s|%s|%t|%s", entry.Network, entry.IPVersion, entry.IP, name, entry.Running, entry.Source)
+	return fmt.Sprintf("%s|%d|%s|%s|%t|%s|%s|%s|%s",
+		entry.Network,
+		entry.IPVersion,
+		entry.IP,
+		name,
+		entry.Running,
+		entry.Source,
+		strings.TrimSpace(entry.Service),
+		strings.TrimSpace(entry.Project),
+		strings.TrimSpace(entry.ComposeFile),
+	)
 }
 
 func psEntryName(entry IPEntry) string {
@@ -204,37 +231,66 @@ func psEntryName(entry IPEntry) string {
 	return name
 }
 
-func sortPSRowsByIP(entries []IPEntry) {
+func sortPSRows(entries []IPEntry, style string) {
+	psSortName := func(entry IPEntry) string {
+		name := strings.TrimSpace(entry.ContainerName)
+		if name == "" {
+			name = strings.TrimSpace(entry.Service)
+		}
+		return name
+	}
 	sort.Slice(entries, func(i, j int) bool {
-		if cmp := compareIPStrings(entries[i].IP, entries[j].IP); cmp != 0 {
-			return cmp < 0
+		nameI := psSortName(entries[i])
+		nameJ := psSortName(entries[j])
+		cmpName := func() (bool, bool) {
+			if nameI != nameJ {
+				return nameI < nameJ, true
+			}
+			return false, false
 		}
-		if entries[i].Network != entries[j].Network {
-			return entries[i].Network < entries[j].Network
+		cmpNet := func() (bool, bool) {
+			if entries[i].Network != entries[j].Network {
+				return entries[i].Network < entries[j].Network, true
+			}
+			return false, false
+		}
+		cmpIP := func() (bool, bool) {
+			if cmp := compareIPStrings(entries[i].IP, entries[j].IP); cmp != 0 {
+				return cmp < 0, true
+			}
+			return false, false
+		}
+		cmpRegular := func() (bool, bool) {
+			if entries[i].Running != entries[j].Running {
+				return entries[i].Running && !entries[j].Running, true
+			}
+			if entries[i].Source != entries[j].Source {
+				return entries[i].Source < entries[j].Source, true
+			}
+			if entries[i].Project != entries[j].Project {
+				return entries[i].Project < entries[j].Project, true
+			}
+			if entries[i].ComposeFile != entries[j].ComposeFile {
+				return entries[i].ComposeFile < entries[j].ComposeFile, true
+			}
+			return false, false
 		}
 
-		nameI := strings.TrimSpace(entries[i].ContainerName)
-		if nameI == "" {
-			nameI = strings.TrimSpace(entries[i].Service)
+		var order []func() (bool, bool)
+		switch style {
+		case "name":
+			order = []func() (bool, bool){cmpName, cmpNet, cmpIP, cmpRegular}
+		case "ip":
+			order = []func() (bool, bool){cmpIP, cmpNet, cmpName, cmpRegular}
+		default:
+			order = []func() (bool, bool){cmpIP, cmpNet, cmpName, cmpRegular}
 		}
-		nameJ := strings.TrimSpace(entries[j].ContainerName)
-		if nameJ == "" {
-			nameJ = strings.TrimSpace(entries[j].Service)
+		for _, cmp := range order {
+			if res, ok := cmp(); ok {
+				return res
+			}
 		}
-		if nameI != nameJ {
-			return nameI < nameJ
-		}
-
-		if entries[i].Running != entries[j].Running {
-			return entries[i].Running && !entries[j].Running
-		}
-		if entries[i].Source != entries[j].Source {
-			return entries[i].Source < entries[j].Source
-		}
-		if entries[i].Project != entries[j].Project {
-			return entries[i].Project < entries[j].Project
-		}
-		return entries[i].ComposeFile < entries[j].ComposeFile
+		return false
 	})
 }
 

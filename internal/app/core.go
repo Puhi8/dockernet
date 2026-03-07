@@ -101,7 +101,7 @@ type freeResultRow struct {
 func run(args []string, stdout, stderr io.Writer) (int, error) {
 	globals, err := parseGlobalFlags(args)
 	if err != nil {
-		printMainUsage(stdout)
+		writeHelpMenu(stdout, "main")
 		return exitCodeRuntime, err
 	}
 
@@ -138,13 +138,9 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 	case "sections":
 		return runSections(opts, globals.CommandArgs, stdout, stderr)
 	default:
-		printMainUsage(stdout)
+		writeHelpMenu(stdout, "main")
 		return exitCodeRuntime, fmt.Errorf("unknown command %q", globals.Command)
 	}
-}
-
-func printMainUsage(w io.Writer) {
-	writeHelpMenu(w, "main")
 }
 
 func parseGlobalFlags(args []string) (parsedGlobalFlags, error) {
