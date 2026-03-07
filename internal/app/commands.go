@@ -205,8 +205,10 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 
 	var networkFilter string
 	var groupName string
+	groupNumber := -1
 	addFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
 	addFlag(flagSet, &groupName, "g", "group", "", "group filter")
+	addFlag(flagSet, &groupNumber, "gn", "group-number", -1, "group number (0-based, config order)")
 
 	if err := flagSet.Parse(args); err != nil {
 		return exitCodeRuntime, err
@@ -215,42 +217,55 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 		return exitCodeRuntime, fmt.Errorf("unexpected args for check: %v", flagSet.Args())
 	}
 
+	selectedGroup, err := resolveGroupSelection(groupName, groupNumber, opts.Groups, opts.GroupOrder)
+	if err != nil {
+		return exitCodeRuntime, err
+	}
+	if !opts.JSON && selectedGroup.Explicit {
+		printSelectedGroupLine(stdout, selectedGroup)
+	}
+
 	state, err := discoverState(ctx, opts)
 	if err != nil {
 		return exitCodeRuntime, err
 	}
-	emitDiscoveryWarnings(stderr, state, opts.Quiet, opts.JSON)
-
 	scopeNetworks := resolveScopedNetworks(networkFilter, nil, state.Networks, false)
 	scopeSet := make(map[string]struct{}, len(scopeNetworks))
 	for _, network := range scopeNetworks {
 		scopeSet[network] = struct{}{}
 	}
+	emitDiscoveryWarnings(stderr, state, opts.Quiet, opts.JSON)
 
 	var groupRange *IPRange
-	if strings.TrimSpace(groupName) != "" {
-		foundRange, ok := opts.Groups[groupName]
-		if !ok {
-			return exitCodeRuntime, fmt.Errorf("group %q not found", groupName)
-		}
+	if selectedGroup.Explicit {
+		foundRange := opts.Groups[selectedGroup.Name]
 		groupRange = &foundRange
 	}
 
-	conflicts := collectCheckConflicts(state.ComposeEntries, state.DockerEntries, scopeSet, groupName, groupRange)
+	conflicts := collectCheckConflicts(state.ComposeEntries, state.DockerEntries, scopeSet, selectedGroup.Name, groupRange, opts.Groups)
 
 	if opts.JSON {
+		var selectedGroupNumber *int
+		if selectedGroup.Explicit && selectedGroup.Number >= 0 {
+			value := selectedGroup.Number
+			selectedGroupNumber = &value
+		}
 		payload := struct {
-			SchemaVersion string          `json:"schema_version"`
-			Command       string          `json:"command"`
-			ComposeOnly   bool            `json:"compose_only"`
-			Warnings      []string        `json:"warnings,omitempty"`
-			Conflicts     []checkConflict `json:"conflicts"`
+			SchemaVersion       string          `json:"schema_version"`
+			Command             string          `json:"command"`
+			ComposeOnly         bool            `json:"compose_only"`
+			SelectedGroup       string          `json:"selected_group,omitempty"`
+			SelectedGroupNumber *int            `json:"selected_group_number,omitempty"`
+			Warnings            []string        `json:"warnings,omitempty"`
+			Conflicts           []checkConflict `json:"conflicts"`
 		}{
-			SchemaVersion: schemaVersion,
-			Command:       "check",
-			ComposeOnly:   state.Degraded,
-			Warnings:      state.Warnings,
-			Conflicts:     conflicts,
+			SchemaVersion:       schemaVersion,
+			Command:             "check",
+			ComposeOnly:         state.Degraded,
+			SelectedGroup:       selectedGroup.Name,
+			SelectedGroupNumber: selectedGroupNumber,
+			Warnings:            state.Warnings,
+			Conflicts:           conflicts,
 		}
 		if err := writeJSON(stdout, payload); err != nil {
 			return exitCodeRuntime, err
@@ -259,13 +274,17 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 		if len(conflicts) == 0 {
 			fmt.Fprintln(stdout, successLine(stdout, "no conflicts"))
 		} else {
+			rows := make([][]string, 0, len(conflicts))
 			for _, conflict := range conflicts {
-				fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n",
+				rows = append(rows, []string{
 					conflictTypeLabel(stdout, conflict.Type),
 					conflict.Network,
 					colorize(stdout, ansiRed, conflict.IP),
 					strings.Join(conflict.Details, "; "),
-				)
+				})
+			}
+			if err := printAlignedRows(stdout, rows); err != nil {
+				return exitCodeRuntime, err
 			}
 		}
 	}
@@ -290,8 +309,10 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 
 	var groupName string
 	var networkFilter string
+	groupNumber := -1
 	count := 2
 	addFlag(flagSet, &groupName, "g", "group", "", "group name")
+	addFlag(flagSet, &groupNumber, "gn", "group-number", -1, "group number (0-based, config order)")
 	addFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
 
 	if err := flagSet.Parse(args); err != nil {
@@ -313,12 +334,17 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 		return exitCodeRuntime, errors.New("nextFree count must be > 0")
 	}
 
-	groupNames := make([]string, 0)
-	if strings.TrimSpace(groupName) != "" {
-		if _, ok := opts.Groups[groupName]; !ok {
-			return exitCodeRuntime, fmt.Errorf("group %q not found", groupName)
-		}
-		groupNames = append(groupNames, groupName)
+	selectedGroup, err := resolveGroupSelection(groupName, groupNumber, opts.Groups, opts.GroupOrder)
+	if err != nil {
+		return exitCodeRuntime, err
+	}
+	if !opts.JSON && selectedGroup.Explicit {
+		printSelectedGroupLine(stdout, selectedGroup)
+	}
+
+	groupNames := make([]string, 0, len(opts.Groups))
+	if selectedGroup.Explicit {
+		groupNames = append(groupNames, selectedGroup.Name)
 	} else {
 		groupNames = orderedGroupNames(opts.Groups, opts.GroupOrder)
 	}
@@ -374,43 +400,69 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 		if notEnough {
 			warnings = append(warnings, notEnoughWarning)
 		}
+		var selectedGroupNumber *int
+		if selectedGroup.Explicit && selectedGroup.Number >= 0 {
+			value := selectedGroup.Number
+			selectedGroupNumber = &value
+		}
 		payload := struct {
-			SchemaVersion string          `json:"schema_version"`
-			Command       string          `json:"command"`
-			ComposeOnly   bool            `json:"compose_only"`
-			Warnings      []string        `json:"warnings,omitempty"`
-			Results       []freeResultRow `json:"results"`
+			SchemaVersion       string          `json:"schema_version"`
+			Command             string          `json:"command"`
+			ComposeOnly         bool            `json:"compose_only"`
+			SelectedGroup       string          `json:"selected_group,omitempty"`
+			SelectedGroupNumber *int            `json:"selected_group_number,omitempty"`
+			Warnings            []string        `json:"warnings,omitempty"`
+			Results             []freeResultRow `json:"results"`
 		}{
-			SchemaVersion: schemaVersion,
-			Command:       "nextFree",
-			ComposeOnly:   state.Degraded,
-			Warnings:      warnings,
-			Results:       rows,
+			SchemaVersion:       schemaVersion,
+			Command:             "nextFree",
+			ComposeOnly:         state.Degraded,
+			SelectedGroup:       selectedGroup.Name,
+			SelectedGroupNumber: selectedGroupNumber,
+			Warnings:            warnings,
+			Results:             rows,
 		}
 		if err := writeJSON(stdout, payload); err != nil {
 			return exitCodeRuntime, err
 		}
 	} else {
 		table := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(table, "%s\t%s\t%s\n",
-			colorize(stdout, ansiCyan, "GROUP"),
-			colorize(stdout, ansiCyan, "NETWORK"),
-			colorize(stdout, ansiCyan, "NEXT_FREE"),
-		)
-		for _, row := range rows {
-			nextValue := "-"
-			if len(row.IPs) > 0 {
-				nextValue = strings.Join(row.IPs, ", ")
+		if groupNumber >= 0 {
+			for _, row := range rows {
+				nextValue := "-"
+				if len(row.IPs) > 0 {
+					nextValue = strings.Join(row.IPs, ", ")
+				}
+				nextValueOut := colorize(stdout, ansiGray, nextValue)
+				if nextValue != "-" {
+					nextValueOut = colorize(stdout, ansiGreen, nextValue)
+				}
+				fmt.Fprintf(table, "%s\t%s\n",
+					colorize(stdout, ansiCyan, row.Network),
+					nextValueOut,
+				)
 			}
-			nextValueOut := colorize(stdout, ansiGray, nextValue)
-			if nextValue != "-" {
-				nextValueOut = colorize(stdout, ansiGreen, nextValue)
-			}
+		} else {
 			fmt.Fprintf(table, "%s\t%s\t%s\n",
-				colorize(stdout, ansiBlue, row.Group),
-				colorize(stdout, ansiCyan, row.Network),
-				nextValueOut,
+				colorize(stdout, ansiCyan, "GROUP"),
+				colorize(stdout, ansiCyan, "NETWORK"),
+				colorize(stdout, ansiCyan, "NEXT_FREE"),
 			)
+			for _, row := range rows {
+				nextValue := "-"
+				if len(row.IPs) > 0 {
+					nextValue = strings.Join(row.IPs, ", ")
+				}
+				nextValueOut := colorize(stdout, ansiGray, nextValue)
+				if nextValue != "-" {
+					nextValueOut = colorize(stdout, ansiGreen, nextValue)
+				}
+				fmt.Fprintf(table, "%s\t%s\t%s\n",
+					colorize(stdout, ansiBlue, row.Group),
+					colorize(stdout, ansiCyan, row.Network),
+					nextValueOut,
+				)
+			}
 		}
 		if err := table.Flush(); err != nil {
 			return exitCodeRuntime, err
@@ -424,6 +476,76 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 		return exitCodeDegraded, nil
 	}
 	return exitCodeOK, nil
+}
+
+type groupSelection struct {
+	Name     string
+	Number   int
+	Explicit bool
+}
+
+func resolveGroupSelection(groupName string, groupNumber int, groups map[string]IPRange, configOrder []string) (groupSelection, error) {
+	selected := groupSelection{Number: -1}
+	groupName = strings.TrimSpace(groupName)
+
+	if groupName != "" && groupNumber != -1 {
+		return selected, errors.New("use either --group or --group-number, not both")
+	}
+	if groupName == "" && groupNumber == -1 {
+		return selected, nil
+	}
+
+	ordered := orderedGroupNames(groups, configOrder)
+
+	if groupName != "" {
+		if _, ok := groups[groupName]; !ok {
+			return selected, fmt.Errorf("group %q not found", groupName)
+		}
+		selected.Name = groupName
+		selected.Number = indexOfString(ordered, groupName)
+		selected.Explicit = true
+		return selected, nil
+	}
+
+	if groupNumber < 0 {
+		return selected, errors.New("group number must be >= 0")
+	}
+	if len(ordered) == 0 {
+		return selected, errors.New("no groups configured")
+	}
+	if groupNumber >= len(ordered) {
+		return selected, fmt.Errorf("group number %d out of range (valid: 0-%d)", groupNumber, len(ordered)-1)
+	}
+
+	selected.Name = ordered[groupNumber]
+	selected.Number = groupNumber
+	selected.Explicit = true
+	return selected, nil
+}
+
+func printSelectedGroupLine(w io.Writer, selected groupSelection) {
+	if !selected.Explicit {
+		return
+	}
+
+	label := selected.Name
+	if selected.Number >= 0 {
+		label = fmt.Sprintf("%s (#%d)", selected.Name, selected.Number)
+	}
+
+	fmt.Fprintf(w, "%s %s\n",
+		colorize(w, ansiBlue, "group:"),
+		colorize(w, ansiMagenta, label),
+	)
+}
+
+func indexOfString(values []string, needle string) int {
+	for idx, value := range values {
+		if value == needle {
+			return idx
+		}
+	}
+	return -1
 }
 
 func orderedGroupNames(groups map[string]IPRange, configOrder []string) []string {
@@ -445,10 +567,9 @@ func orderedGroupNames(groups map[string]IPRange, configOrder []string) []string
 
 	extras := make([]string, 0, len(groups)-len(ordered))
 	for name := range groups {
-		if _, exists := seen[name]; exists {
-			continue
+		if _, exists := seen[name]; !exists {
+			extras = append(extras, name)
 		}
-		extras = append(extras, name)
 	}
 	sort.Strings(extras)
 
@@ -496,7 +617,10 @@ func runSections(opts runtimeOptions, args []string, stdout, stderr io.Writer) (
 		return exitCodeOK, nil
 	}
 
-	config := &Config{Groups: opts.Groups}
+	config := &Config{
+		Groups:     opts.Groups,
+		GroupOrder: append([]string(nil), opts.GroupOrder...),
+	}
 	if edit {
 		editor := strings.TrimSpace(os.Getenv("EDITOR"))
 		if editor == "" {
@@ -522,11 +646,7 @@ func runSections(opts runtimeOptions, args []string, stdout, stderr io.Writer) (
 		Start string `json:"start"`
 		End   string `json:"end"`
 	}, 0, len(config.Groups))
-	groupNames := make([]string, 0, len(config.Groups))
-	for name := range config.Groups {
-		groupNames = append(groupNames, name)
-	}
-	sort.Strings(groupNames)
+	groupNames := orderedGroupNames(config.Groups, config.GroupOrder)
 	for _, groupName := range groupNames {
 		groupRange := config.Groups[groupName]
 		groupRows = append(groupRows, struct {

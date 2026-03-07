@@ -135,10 +135,9 @@ func filterComposeFilesByVolumePaths(files []string, volumePaths []string) []str
 	filterRules := normalizeIgnorePaths(volumePaths)
 	filtered := make([]string, 0, len(files))
 	for _, file := range files {
-		if shouldIgnorePath(file, filterRules) {
-			continue
+		if !shouldIgnorePath(file, filterRules) {
+			filtered = append(filtered, file)
 		}
-		filtered = append(filtered, file)
 	}
 	sort.Strings(filtered)
 	return filtered
@@ -152,10 +151,9 @@ func normalizeIgnorePaths(ignore []string) []string {
 			continue
 		}
 		rule = strings.TrimSuffix(filepath.Clean(rule), string(os.PathSeparator))
-		if rule == "." {
-			continue
+		if rule != "." {
+			normalized = append(normalized, rule)
 		}
-		normalized = append(normalized, rule)
 	}
 	return dedupeStrings(normalized)
 }

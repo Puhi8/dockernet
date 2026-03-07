@@ -134,10 +134,9 @@ func parseServiceNetworkRefs(serviceNode *yaml.Node) []serviceNetworkRef {
 	case yaml.SequenceNode:
 		for _, item := range networkNode.Content {
 			name := strings.TrimSpace(yamlScalar(item))
-			if name == "" {
-				continue
+			if name != "" {
+				refs = append(refs, serviceNetworkRef{Name: name})
 			}
-			refs = append(refs, serviceNetworkRef{Name: name})
 		}
 	case yaml.MappingNode:
 		for alias, valueNode := range yamlMapPairs(networkNode) {
@@ -146,10 +145,9 @@ func parseServiceNetworkRefs(serviceNode *yaml.Node) []serviceNetworkRef {
 				ref.IPv4 = normalizeValidIP(stripCIDR(strings.TrimSpace(yamlScalar(yamlMapLookup(valueNode, "ipv4_address")))), 4)
 				ref.IPv6 = normalizeValidIP(stripCIDR(strings.TrimSpace(yamlScalar(yamlMapLookup(valueNode, "ipv6_address")))), 6)
 			}
-			if ref.Name == "" {
-				continue
+			if ref.Name != "" {
+				refs = append(refs, ref)
 			}
-			refs = append(refs, ref)
 		}
 	}
 
@@ -171,10 +169,9 @@ func parseComposeNetworkAliases(document *yaml.Node) map[string]string {
 				resolved = named
 			}
 		}
-		if resolved == "" {
-			continue
+		if resolved != "" {
+			aliases[alias] = resolved
 		}
-		aliases[alias] = resolved
 	}
 	return aliases
 }
@@ -221,10 +218,9 @@ func loadDotEnvFile(composeDir string) (map[string]string, error) {
 		}
 		key = strings.TrimSpace(key)
 		value = strings.Trim(strings.TrimSpace(value), `"'`)
-		if key == "" {
-			continue
+		if key != "" {
+			result[key] = value
 		}
-		result[key] = value
 	}
 	return result, nil
 }
@@ -410,12 +406,9 @@ func hasTopLevelServicesKey(data []byte) bool {
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		// Only accept top-level YAML keys to avoid matching nested CI keys.
-		if strings.TrimLeft(line, " \t") != line {
+		if trimmed == "" ||
+			strings.HasPrefix(trimmed, "#") ||
+			strings.TrimLeft(line, " \t") != line {
 			continue
 		}
 
