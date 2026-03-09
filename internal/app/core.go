@@ -133,7 +133,7 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 		return runPS(context.Background(), opts, globals.CommandArgs, stdout, stderr)
 	case "check":
 		return runCheck(context.Background(), opts, globals.CommandArgs, stdout, stderr)
-	case "nextFree", "nextfree":
+	case "nextFree", "nextfree", "next":
 		return runNextFree(context.Background(), opts, globals.CommandArgs, stdout, stderr)
 	case "sections":
 		return runSections(opts, globals.CommandArgs, stdout, stderr)

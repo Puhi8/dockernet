@@ -110,18 +110,9 @@ func conflictTypeLabel(w io.Writer, conflictType string) string {
 }
 
 func visibleWidth(text string) int {
-	return len([]rune(stripANSI(text)))
-}
-
-func padRightVisible(text string, width int) string {
-	padding := width - visibleWidth(text)
-	if padding <= 0 {
-		return text
+	isANSIFinalByte := func(b byte) bool {
+		return b >= 0x40 && b <= 0x7E
 	}
-	return text + strings.Repeat(" ", padding)
-}
-
-func stripANSI(text string) string {
 	var builder strings.Builder
 	for idx := 0; idx < len(text); {
 		if text[idx] == 0x1b && idx+1 < len(text) && text[idx+1] == '[' {
@@ -137,9 +128,13 @@ func stripANSI(text string) string {
 		builder.WriteByte(text[idx])
 		idx++
 	}
-	return builder.String()
+	return len([]rune(builder.String()))
 }
 
-func isANSIFinalByte(b byte) bool {
-	return b >= 0x40 && b <= 0x7E
+func padRightVisible(text string, width int) string {
+	padding := width - visibleWidth(text)
+	if padding <= 0 {
+		return text
+	}
+	return text + strings.Repeat(" ", padding)
 }

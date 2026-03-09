@@ -2,12 +2,14 @@ Usage:
   dockernet [global flags] ps [flags]
 
 Flags:
-  -r --running            only show running containers 
-  -c --compose-only       only show containers from compose files
   -g --group <name>       only show containers in group
   -gn --group-number <n>  only show containers in group number
   -n --network <name>     only show containers on a network 
+  -r --running            only show running containers 
+  -c --compose-only       only show containers from compose files
+  -a --all-in-one         print one combined table (disable group-separated output)
   -i --ip-prefix <x.y.z>  only show containers whose ip starts with <x.y.z>
   -s --sort <ip|name>     sort rows by ip (default) or container/service name
 
 Output: CONTAINER, NETWORK, IP, RUNNING, SOURCE
+Default plain-text output is separated by configured groups.

@@ -98,7 +98,7 @@ func parseComposeFile(path string, includeIPv6 bool) (composeParseResult, error)
 
 	result.Networks = dedupeStrings(result.Networks)
 	result.VolumePaths = dedupeStrings(result.VolumePaths)
-	sortIPEntries(result.Entries)
+	sortEntries(result.Entries, "ip_entries")
 
 	return result, nil
 }

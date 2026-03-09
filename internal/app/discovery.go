@@ -54,7 +54,7 @@ func discoverState(ctx context.Context, opts runtimeOptions) (*discoveryResult, 
 			}
 		}
 	}
-	sortIPEntries(state.ComposeEntries)
+	sortEntries(state.ComposeEntries, "ip_entries")
 
 	dockerData := discoverDocker(ctx, opts.IncludeIPv6)
 	state.DockerEntries = dockerData.Entries
@@ -150,7 +150,7 @@ func discoverDocker(ctx context.Context, includeIPv6 bool) dockerDiscovery {
 		}
 	}
 
-	sortIPEntries(result.Entries)
+	sortEntries(result.Entries, "ip_entries")
 	result.Available = true
 	return result
 }
