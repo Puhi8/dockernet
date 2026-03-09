@@ -20,6 +20,7 @@ type Config struct {
 	EnableIPv6   bool
 	EnableColor  bool
 	Groups       map[string]IPRange
+	GroupOrder   []string
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -84,6 +85,9 @@ func LoadConfig(path string) (*Config, error) {
 			if !ok {
 				return nil, fmt.Errorf("invalid range for %s: %q", key, val)
 			}
+			if _, exists := cfg.Groups[groupName]; !exists {
+				cfg.GroupOrder = append(cfg.GroupOrder, groupName)
+			}
 			cfg.Groups[groupName] = ipRange
 		}
 	}
@@ -119,10 +123,9 @@ func parseCSVList(value string) []string {
 	result := make([]string, 0, len(parts))
 	for _, part := range parts {
 		item := strings.TrimSpace(part)
-		if item == "" {
-			continue
+		if item != "" {
+			result = append(result, item)
 		}
-		result = append(result, item)
 	}
 	return result
 }
@@ -135,16 +138,12 @@ func parseIPRange(value string) (IPRange, bool) {
 
 	start, err := netip.ParseAddr(strings.TrimSpace(startRaw))
 	end, err := netip.ParseAddr(strings.TrimSpace(endRaw))
-	if err != nil {
-		return IPRange{}, false
-	}
-
-	if !start.IsValid() || !end.IsValid() || start.Is4() != end.Is4() || start.Compare(end) > 0 {
-		return IPRange{}, false
-	}
-
-	// Legacy short ranges like "1-10" are intentionally unsupported.
-	if strings.Count(strings.TrimSpace(startRaw), ".") == 0 || strings.Count(strings.TrimSpace(endRaw), ".") == 0 {
+	if err != nil ||
+		!start.IsValid() || !end.IsValid() ||
+		start.Is4() != end.Is4() ||
+		start.Compare(end) > 0 ||
+		strings.Count(strings.TrimSpace(startRaw), ".") == 0 ||
+		strings.Count(strings.TrimSpace(endRaw), ".") == 0 {
 		return IPRange{}, false
 	}
 

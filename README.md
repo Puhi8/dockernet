@@ -62,6 +62,9 @@ dockernet nextFree 3
 # Get exactly 1 free IP
 dockernet nextFree 1
 
+# Get free IPs by group index (0-based config order)
+dockernet nextFree --group-number 1 2
+
 # Validate group overlaps/ranges
 dockernet sections --validate
 ```

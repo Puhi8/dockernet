@@ -35,11 +35,10 @@ func buildPSRows(composeEntries, dockerEntries []IPEntry) []IPEntry {
 
 		if matched == -1 {
 			for _, dockerIdx := range dockerIndex.byKey[key] {
-				if matchedDocker[dockerIdx] || !dockerMatchesCompose(composeEntry, dockerEntries[dockerIdx]) {
-					continue
+				if !matchedDocker[dockerIdx] && dockerMatchesCompose(composeEntry, dockerEntries[dockerIdx]) {
+					matched = dockerIdx
+					break
 				}
-				matched = dockerIdx
-				break
 			}
 		}
 
@@ -60,14 +59,13 @@ func buildPSRows(composeEntries, dockerEntries []IPEntry) []IPEntry {
 	}
 
 	for idx, dockerEntry := range dockerEntries {
-		if matchedDocker[idx] {
-			continue
+		if !matchedDocker[idx] {
+			rows = append(rows, dockerEntry)
 		}
-		rows = append(rows, dockerEntry)
 	}
 
 	rows = dedupePSRows(rows)
-	sortIPEntries(rows)
+	sortEntries(rows, "ip_entries")
 	return rows
 }
 
@@ -123,11 +121,10 @@ func dockerContainerManagedPrefixes(containerName string) []string {
 		}
 
 		prefix := containerName[:idx+1]
-		if _, ok := seen[prefix]; ok {
-			continue
+		if _, ok := seen[prefix]; !ok {
+			seen[prefix] = struct{}{}
+			prefixes = append(prefixes, prefix)
 		}
-		seen[prefix] = struct{}{}
-		prefixes = append(prefixes, prefix)
 	}
 	return prefixes
 }
@@ -138,18 +135,14 @@ func composeManagedPrefixes(entry IPEntry) []string {
 	if project == "" || service == "" {
 		return nil
 	}
-	return []string{
-		project + "-" + service + "-",
-		project + "_" + service + "_",
-	}
+	return []string{project + "-" + service + "-", project + "_" + service + "_"}
 }
 
 func firstUnmatchedDockerIndex(candidates []int, matched []bool) int {
 	for _, idx := range candidates {
-		if matched[idx] {
-			continue
+		if !matched[idx] {
+			return idx
 		}
-		return idx
 	}
 	return -1
 }
@@ -159,36 +152,54 @@ func dedupePSRows(rows []IPEntry) []IPEntry {
 		return nil
 	}
 
-	// If we already have a merged "both" row for a service/network/ip, skip compose-only duplicates.
+	// If we already have a merged "both" row for the same compose identity/network/ip, skip compose-only duplicates.
 	mergedKeys := make(map[string]struct{})
 	for _, row := range rows {
-		if row.Source != "both" {
-			continue
+		if row.Source == "both" {
+			mergedKeys[psComposeKey(row)] = struct{}{}
 		}
-		mergedKeys[psServiceKey(row)] = struct{}{}
 	}
 
 	seen := make(map[string]struct{}, len(rows))
 	deduped := make([]IPEntry, 0, len(rows))
 	for _, row := range rows {
 		if row.Source == "compose" {
-			if _, exists := mergedKeys[psServiceKey(row)]; exists {
+			if _, exists := mergedKeys[psComposeKey(row)]; exists {
 				continue
 			}
 		}
 
 		key := psDisplayKey(row)
-		if _, exists := seen[key]; exists {
-			continue
+		if _, exists := seen[key]; !exists {
+			seen[key] = struct{}{}
+			deduped = append(deduped, row)
 		}
-		seen[key] = struct{}{}
-		deduped = append(deduped, row)
 	}
 	return deduped
 }
 
-func psServiceKey(entry IPEntry) string {
-	return fmt.Sprintf("%s|%d|%s|%s", entry.Network, entry.IPVersion, entry.IP, strings.TrimSpace(entry.Service))
+func psComposeKey(entry IPEntry) string {
+	return fmt.Sprintf("%s|%d|%s|%s", entry.Network, entry.IPVersion, entry.IP, psComposeIdentity(entry))
+}
+
+func psComposeIdentity(entry IPEntry) string {
+	service := strings.TrimSpace(entry.Service)
+	project := strings.TrimSpace(entry.Project)
+	composeFile := strings.TrimSpace(entry.ComposeFile)
+	switch {
+	case project != "" && service != "":
+		return "project:" + project + "|service:" + service
+	case service != "" && composeFile != "":
+		return "service:" + service + "|file:" + composeFile
+	case service != "":
+		return "service:" + service
+	case composeFile != "":
+		return "file:" + composeFile
+	}
+	if containerName := strings.TrimSpace(entry.ContainerName); containerName != "" {
+		return "container:" + containerName
+	}
+	return "-"
 }
 
 func psDisplayKey(entry IPEntry) string {
@@ -196,7 +207,17 @@ func psDisplayKey(entry IPEntry) string {
 	if name == "" {
 		name = strings.TrimSpace(entry.Service)
 	}
-	return fmt.Sprintf("%s|%d|%s|%s|%t|%s", entry.Network, entry.IPVersion, entry.IP, name, entry.Running, entry.Source)
+	return fmt.Sprintf("%s|%d|%s|%s|%t|%s|%s|%s|%s",
+		entry.Network,
+		entry.IPVersion,
+		entry.IP,
+		name,
+		entry.Running,
+		entry.Source,
+		strings.TrimSpace(entry.Service),
+		strings.TrimSpace(entry.Project),
+		strings.TrimSpace(entry.ComposeFile),
+	)
 }
 
 func psEntryName(entry IPEntry) string {
@@ -210,50 +231,56 @@ func psEntryName(entry IPEntry) string {
 	return name
 }
 
-func sortPSRowsByIP(entries []IPEntry) {
-	sort.Slice(entries, func(i, j int) bool {
-		if cmp := compareIPStrings(entries[i].IP, entries[j].IP); cmp != 0 {
-			return cmp < 0
-		}
-		if entries[i].Network != entries[j].Network {
-			return entries[i].Network < entries[j].Network
-		}
-
-		nameI := strings.TrimSpace(entries[i].ContainerName)
-		if nameI == "" {
-			nameI = strings.TrimSpace(entries[i].Service)
-		}
-		nameJ := strings.TrimSpace(entries[j].ContainerName)
-		if nameJ == "" {
-			nameJ = strings.TrimSpace(entries[j].Service)
-		}
-		if nameI != nameJ {
-			return nameI < nameJ
-		}
-
-		if entries[i].Running != entries[j].Running {
-			return entries[i].Running && !entries[j].Running
-		}
-		if entries[i].Source != entries[j].Source {
-			return entries[i].Source < entries[j].Source
-		}
-		if entries[i].Project != entries[j].Project {
-			return entries[i].Project < entries[j].Project
-		}
-		return entries[i].ComposeFile < entries[j].ComposeFile
-	})
-}
-
-func collectCheckConflicts(composeEntries, dockerEntries []IPEntry, scopeNetworks map[string]struct{}, groupName string, groupRange *IPRange) []checkConflict {
+func collectCheckConflicts(
+	composeEntries,
+	dockerEntries []IPEntry,
+	scopeNetworks map[string]struct{},
+	groupName string,
+	groupRange *IPRange,
+	groups map[string]IPRange,
+) []checkConflict {
 	conflicts := make([]checkConflict, 0)
 
 	filteredCompose := make([]IPEntry, 0, len(composeEntries))
 	for _, composeEntry := range composeEntries {
 		_, ok := scopeNetworks[composeEntry.Network]
-		if !ok || isListOnlyNetwork(composeEntry.Network) {
-			continue
+		if ok && !isListOnlyNetwork(composeEntry.Network) {
+			filteredCompose = append(filteredCompose, composeEntry)
 		}
-		filteredCompose = append(filteredCompose, composeEntry)
+	}
+
+	if groupRange != nil {
+		inRangeCompose := make([]IPEntry, 0, len(filteredCompose))
+		for _, composeEntry := range filteredCompose {
+			ipAddr, err := netip.ParseAddr(composeEntry.IP)
+			if err != nil {
+				conflicts = append(conflicts, outOfGroupConflict(composeEntry, groupName))
+				continue
+			}
+			if ipInRange(ipAddr, *groupRange) {
+				inRangeCompose = append(inRangeCompose, composeEntry)
+				continue
+			}
+			if linkedGroup := findMatchingGroupName(ipAddr, groups, nil); linkedGroup == "" {
+				conflicts = append(conflicts, outOfGroupConflict(composeEntry, groupName))
+			}
+		}
+		filteredCompose = inRangeCompose
+	} else if len(groups) > 0 {
+		inAnyGroupCompose := make([]IPEntry, 0, len(filteredCompose))
+		for _, composeEntry := range filteredCompose {
+			ipAddr, err := netip.ParseAddr(composeEntry.IP)
+			if err != nil {
+				conflicts = append(conflicts, outOfGroupConflict(composeEntry, "unassigned"))
+				continue
+			}
+			if findMatchingGroupName(ipAddr, groups, nil) == "" {
+				conflicts = append(conflicts, outOfGroupConflict(composeEntry, "unassigned"))
+				continue
+			}
+			inAnyGroupCompose = append(inAnyGroupCompose, composeEntry)
+		}
+		filteredCompose = inAnyGroupCompose
 	}
 
 	composeByKey := make(map[string][]IPEntry)
@@ -263,20 +290,20 @@ func collectCheckConflicts(composeEntries, dockerEntries []IPEntry, scopeNetwork
 
 	runningByKey := make(map[string][]IPEntry)
 	for _, dockerEntry := range dockerEntries {
-		if !dockerEntry.Running || isListOnlyNetwork(dockerEntry.Network) {
-			continue
+		if _, ok := scopeNetworks[dockerEntry.Network]; ok &&
+			dockerEntry.Running &&
+			!isListOnlyNetwork(dockerEntry.Network) {
+			runningByKey[entryKey(dockerEntry)] = append(runningByKey[entryKey(dockerEntry)], dockerEntry)
 		}
-		if _, ok := scopeNetworks[dockerEntry.Network]; !ok {
-			continue
-		}
-		runningByKey[entryKey(dockerEntry)] = append(runningByKey[entryKey(dockerEntry)], dockerEntry)
 	}
 
+	duplicateConflictKeys := make(map[string]struct{})
 	for key, entries := range composeByKey {
 		if len(entries) < 2 {
 			continue
 		}
-		sortIPEntries(entries)
+		duplicateConflictKeys[key] = struct{}{}
+		sortEntries(entries, "ip_entries")
 		names := conflictNamesForKey(key, composeByKey, runningByKey)
 		conflicts = append(conflicts, checkConflict{
 			Type:    "duplicate_compose_ip",
@@ -290,45 +317,26 @@ func collectCheckConflicts(composeEntries, dockerEntries []IPEntry, scopeNetwork
 	for _, composeEntry := range filteredCompose {
 		key := entryKey(composeEntry)
 		for _, dockerEntry := range runningByKey[key] {
-			if dockerMatchesCompose(composeEntry, dockerEntry) {
-				continue
+			if !dockerMatchesCompose(composeEntry, dockerEntry) {
+				runningConflictKeys[key] = struct{}{}
+				break
 			}
-			runningConflictKeys[key] = struct{}{}
-			break
 		}
 	}
 	for key := range runningConflictKeys {
-		entries := composeByKey[key]
-		if len(entries) == 0 {
+		if _, duplicate := duplicateConflictKeys[key]; duplicate {
 			continue
 		}
-		sortIPEntries(entries)
-		names := conflictNamesForKey(key, composeByKey, runningByKey)
-		conflicts = append(conflicts, checkConflict{
-			Type:    "running_ip_taken",
-			Network: entries[0].Network,
-			IP:      entries[0].IP,
-			Details: []string{fmt.Sprintf("%s", strings.Join(names, ", "))},
-		})
-	}
-
-	if groupRange != nil {
-		for _, composeEntry := range filteredCompose {
-			ipAddr, err := netip.ParseAddr(composeEntry.IP)
-			if err != nil || ipAddr.Is4() != groupRange.Start.Is4() {
-				continue
-			}
-			if ipAddr.Compare(groupRange.Start) < 0 || ipAddr.Compare(groupRange.End) > 0 {
-				conflicts = append(conflicts, checkConflict{
-					Type:    "out_of_group",
-					Network: composeEntry.Network,
-					IP:      composeEntry.IP,
-					Details: []string{
-						fmt.Sprintf("service=%s", composeEntry.Service),
-						fmt.Sprintf("group=%s", groupName),
-					},
-				})
-			}
+		entries := composeByKey[key]
+		if len(entries) != 0 {
+			sortEntries(entries, "ip_entries")
+			names := conflictNamesForKey(key, composeByKey, runningByKey)
+			conflicts = append(conflicts, checkConflict{
+				Type:    "running_ip_taken",
+				Network: entries[0].Network,
+				IP:      entries[0].IP,
+				Details: []string{fmt.Sprintf("%s", strings.Join(names, ", "))},
+			})
 		}
 	}
 
@@ -344,6 +352,18 @@ func collectCheckConflicts(composeEntries, dockerEntries []IPEntry, scopeNetwork
 	return conflicts
 }
 
+func outOfGroupConflict(entry IPEntry, groupName string) checkConflict {
+	return checkConflict{
+		Type:    "out_of_group",
+		Network: entry.Network,
+		IP:      entry.IP,
+		Details: []string{
+			fmt.Sprintf("service=%s", entry.Service),
+			fmt.Sprintf("group=%s", groupName),
+		},
+	}
+}
+
 func conflictNamesForKey(key string, composeByKey map[string][]IPEntry, runningByKey map[string][]IPEntry) []string {
 	seen := make(map[string]struct{})
 	for _, composeEntry := range composeByKey[key] {
@@ -351,17 +371,15 @@ func conflictNamesForKey(key string, composeByKey map[string][]IPEntry, runningB
 		if name == "" {
 			name = strings.TrimSpace(composeEntry.Service)
 		}
-		if name == "" {
-			continue
+		if name != "" {
+			seen[name] = struct{}{}
 		}
-		seen[name] = struct{}{}
 	}
 	for _, dockerEntry := range runningByKey[key] {
 		name := strings.TrimSpace(dockerEntry.ContainerName)
-		if name == "" {
-			continue
+		if name != "" {
+			seen[name] = struct{}{}
 		}
-		seen[name] = struct{}{}
 	}
 
 	names := make([]string, 0, len(seen))
@@ -388,16 +406,12 @@ func dockerMatchesCompose(composeEntry, dockerEntry IPEntry) bool {
 		return false
 	}
 
-	for _, prefix := range []string{
-		project + "-" + service + "-",
-		project + "_" + service + "_",
-	} {
-		if !strings.HasPrefix(dockerContainerName, prefix) {
-			continue
-		}
-		suffix := strings.TrimPrefix(dockerContainerName, prefix)
-		if _, err := strconv.Atoi(suffix); err == nil {
-			return true
+	for _, prefix := range []string{project + "-" + service + "-", project + "_" + service + "_"} {
+		if strings.HasPrefix(dockerContainerName, prefix) {
+			suffix := strings.TrimPrefix(dockerContainerName, prefix)
+			if _, err := strconv.Atoi(suffix); err == nil {
+				return true
+			}
 		}
 	}
 	return false
@@ -473,58 +487,10 @@ func isReservedIPv4(addr netip.Addr) bool {
 	return octets[3] == 0 || octets[3] == 255
 }
 
-func compressIPv4RangeStrings(ips []string) []string {
-	if len(ips) == 0 {
-		return nil
-	}
-
-	addrs := make([]netip.Addr, 0, len(ips))
-	for _, ip := range ips {
-		addr, err := netip.ParseAddr(ip)
-		if err != nil || !addr.Is4() {
-			continue
-		}
-		addrs = append(addrs, addr)
-	}
-	if len(addrs) == 0 {
-		return nil
-	}
-
-	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Compare(addrs[j]) < 0 })
-
-	compressed := make([]string, 0)
-	rangeStart := addrs[0]
-	rangeEnd := addrs[0]
-
-	flushRange := func() {
-		if rangeStart == rangeEnd {
-			compressed = append(compressed, rangeStart.String())
-			return
-		}
-		compressed = append(compressed, rangeStart.String()+"-"+rangeEnd.String())
-	}
-
-	for idx := 1; idx < len(addrs); idx++ {
-		current := addrs[idx]
-		if current == rangeEnd.Next() {
-			rangeEnd = current
-			continue
-		}
-		flushRange()
-		rangeStart = current
-		rangeEnd = current
-	}
-	flushRange()
-	return compressed
-}
-
 func resolveScopedNetworks(explicit string, configured []string, discovered []string, includeHost bool) []string {
 	if strings.TrimSpace(explicit) != "" {
 		candidate := strings.TrimSpace(explicit)
-		if !includeHost && isListOnlyNetwork(candidate) {
-			return nil
-		}
-		if candidate == "none" {
+		if (!includeHost && isListOnlyNetwork(candidate)) || candidate == "none" {
 			return nil
 		}
 		return []string{candidate}
@@ -538,13 +504,9 @@ func resolveScopedNetworks(explicit string, configured []string, discovered []st
 	scope := make([]string, 0, len(base))
 	for _, network := range base {
 		network = strings.TrimSpace(network)
-		if network == "" || network == "none" {
-			continue
+		if network != "" && network != "none" && (includeHost || !isListOnlyNetwork(network)) {
+			scope = append(scope, network)
 		}
-		if !includeHost && isListOnlyNetwork(network) {
-			continue
-		}
-		scope = append(scope, network)
 	}
 	return dedupeStrings(scope)
 }
@@ -601,9 +563,8 @@ func collectGroupOverlapErrors(ranges []namedGroupRange) []string {
 				break
 			}
 			if rangesOverlap(current.rng, candidate.rng) {
-				errorsList = append(errorsList,
-					fmt.Sprintf("overlap: %s (%s-%s) with %s (%s-%s)",
-						current.name, current.rng.Start, current.rng.End, candidate.name, candidate.rng.Start, candidate.rng.End))
+				errorsList = append(errorsList, fmt.Sprintf("overlap: %s (%s-%s) with %s (%s-%s)",
+					current.name, current.rng.Start, current.rng.End, candidate.name, candidate.rng.Start, candidate.rng.End))
 			}
 		}
 	}
@@ -612,38 +573,6 @@ func collectGroupOverlapErrors(ranges []namedGroupRange) []string {
 
 func rangesOverlap(a, b IPRange) bool {
 	return a.Start.Compare(b.End) <= 0 && b.Start.Compare(a.End) <= 0
-}
-
-func sortIPEntries(entries []IPEntry) {
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].Network != entries[j].Network {
-			return entries[i].Network < entries[j].Network
-		}
-		if entries[i].IPVersion != entries[j].IPVersion {
-			return entries[i].IPVersion < entries[j].IPVersion
-		}
-		if cmp := compareIPStrings(entries[i].IP, entries[j].IP); cmp != 0 {
-			return cmp < 0
-		}
-		if entries[i].Source != entries[j].Source {
-			return entries[i].Source < entries[j].Source
-		}
-		nameI := entries[i].ContainerName
-		if strings.TrimSpace(nameI) == "" {
-			nameI = entries[i].Service
-		}
-		nameJ := entries[j].ContainerName
-		if strings.TrimSpace(nameJ) == "" {
-			nameJ = entries[j].Service
-		}
-		if nameI != nameJ {
-			return nameI < nameJ
-		}
-		if entries[i].Project != entries[j].Project {
-			return entries[i].Project < entries[j].Project
-		}
-		return entries[i].ComposeFile < entries[j].ComposeFile
-	})
 }
 
 func compareIPStrings(a, b string) int {
@@ -671,10 +600,9 @@ func emitDiscoveryWarnings(stderr io.Writer, state *discoveryResult, quiet bool,
 	}
 	for _, warning := range state.Warnings {
 		lower := strings.ToLower(warning)
-		if quiet && !strings.Contains(lower, "docker unavailable") {
-			continue
+		if !quiet || strings.Contains(lower, "docker unavailable") {
+			fmt.Fprintln(stderr, warningLine(stderr, warning))
 		}
-		fmt.Fprintln(stderr, warningLine(stderr, warning))
 	}
 }
 
@@ -692,11 +620,10 @@ func dedupeStrings(values []string) []string {
 		if trimmed == "" {
 			continue
 		}
-		if _, exists := seen[trimmed]; exists {
-			continue
+		if _, exists := seen[trimmed]; !exists {
+			seen[trimmed] = struct{}{}
+			result = append(result, trimmed)
 		}
-		seen[trimmed] = struct{}{}
-		result = append(result, trimmed)
 	}
 	sort.Strings(result)
 	return result

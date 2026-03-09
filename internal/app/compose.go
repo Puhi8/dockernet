@@ -98,7 +98,7 @@ func parseComposeFile(path string, includeIPv6 bool) (composeParseResult, error)
 
 	result.Networks = dedupeStrings(result.Networks)
 	result.VolumePaths = dedupeStrings(result.VolumePaths)
-	sortIPEntries(result.Entries)
+	sortEntries(result.Entries, "ip_entries")
 
 	return result, nil
 }
@@ -134,10 +134,9 @@ func parseServiceNetworkRefs(serviceNode *yaml.Node) []serviceNetworkRef {
 	case yaml.SequenceNode:
 		for _, item := range networkNode.Content {
 			name := strings.TrimSpace(yamlScalar(item))
-			if name == "" {
-				continue
+			if name != "" {
+				refs = append(refs, serviceNetworkRef{Name: name})
 			}
-			refs = append(refs, serviceNetworkRef{Name: name})
 		}
 	case yaml.MappingNode:
 		for alias, valueNode := range yamlMapPairs(networkNode) {
@@ -146,10 +145,9 @@ func parseServiceNetworkRefs(serviceNode *yaml.Node) []serviceNetworkRef {
 				ref.IPv4 = normalizeValidIP(stripCIDR(strings.TrimSpace(yamlScalar(yamlMapLookup(valueNode, "ipv4_address")))), 4)
 				ref.IPv6 = normalizeValidIP(stripCIDR(strings.TrimSpace(yamlScalar(yamlMapLookup(valueNode, "ipv6_address")))), 6)
 			}
-			if ref.Name == "" {
-				continue
+			if ref.Name != "" {
+				refs = append(refs, ref)
 			}
-			refs = append(refs, ref)
 		}
 	}
 
@@ -171,10 +169,9 @@ func parseComposeNetworkAliases(document *yaml.Node) map[string]string {
 				resolved = named
 			}
 		}
-		if resolved == "" {
-			continue
+		if resolved != "" {
+			aliases[alias] = resolved
 		}
-		aliases[alias] = resolved
 	}
 	return aliases
 }
@@ -221,10 +218,9 @@ func loadDotEnvFile(composeDir string) (map[string]string, error) {
 		}
 		key = strings.TrimSpace(key)
 		value = strings.Trim(strings.TrimSpace(value), `"'`)
-		if key == "" {
-			continue
+		if key != "" {
+			result[key] = value
 		}
-		result[key] = value
 	}
 	return result, nil
 }
@@ -244,10 +240,8 @@ func interpolateComposeEnv(data string, dotenv map[string]string) string {
 		if ok && strings.TrimSpace(value) != "" {
 			return value
 		}
-		if !ok {
-			if dot := dotenv[name]; strings.TrimSpace(dot) != "" {
-				return dot
-			}
+		if dot := dotenv[name]; strings.TrimSpace(dot) != "" && !ok {
+			return dot
 		}
 		if strings.TrimSpace(value) == "" && strings.TrimSpace(dotenv[name]) != "" {
 			return dotenv[name]
@@ -326,10 +320,7 @@ func yamlMapPairs(node *yaml.Node) map[string]*yaml.Node {
 }
 
 func yamlScalar(node *yaml.Node) string {
-	if node == nil {
-		return ""
-	}
-	if node.Kind == yaml.ScalarNode {
+	if node != nil && node.Kind == yaml.ScalarNode {
 		return strings.TrimSpace(node.Value)
 	}
 	return ""
@@ -373,11 +364,7 @@ func parseScalarVolumeHostPath(raw, composeDir string) string {
 func parseMappingVolumeHostPath(node *yaml.Node, composeDir string) string {
 	volumeType := strings.ToLower(strings.TrimSpace(yamlScalar(yamlMapLookup(node, "type"))))
 	source := strings.TrimSpace(yamlScalar(yamlMapLookup(node, "source")))
-	if source == "" {
-		return ""
-	}
-
-	if volumeType != "" && volumeType != "bind" {
+	if (volumeType != "" && volumeType != "bind") || source == "" {
 		return ""
 	}
 	return resolveBindSourcePath(source, composeDir)
@@ -410,12 +397,9 @@ func hasTopLevelServicesKey(data []byte) bool {
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		// Only accept top-level YAML keys to avoid matching nested CI keys.
-		if strings.TrimLeft(line, " \t") != line {
+		if trimmed == "" ||
+			strings.HasPrefix(trimmed, "#") ||
+			strings.TrimLeft(line, " \t") != line {
 			continue
 		}
 
@@ -442,10 +426,7 @@ func normalizeValidIP(raw string, version int) string {
 		return ""
 	}
 
-	if version == 4 && !addr.Is4() {
-		return ""
-	}
-	if version == 6 && !addr.Is6() {
+	if (version == 4 && !addr.Is4()) || (version == 6 && !addr.Is6()) {
 		return ""
 	}
 	return addr.String()

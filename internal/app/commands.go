@@ -6,12 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 )
 
 func runLS(ctx context.Context, opts runtimeOptions, args []string, stdout, stderr io.Writer) (int, error) {
@@ -22,18 +22,14 @@ func runLS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 
 	flagSet := flag.NewFlagSet("ls", flag.ContinueOnError)
 	flagSet.SetOutput(io.Discard)
-	if err := flagSet.Parse(args); err != nil {
+	if err := parseNoPositionalArgs(flagSet, args, "ls"); err != nil {
 		return exitCodeRuntime, err
 	}
-	if len(flagSet.Args()) > 0 {
-		return exitCodeRuntime, fmt.Errorf("unexpected args for ls: %v", flagSet.Args())
-	}
 
-	state, err := discoverState(ctx, opts)
+	state, err := discoverStateAndEmitWarnings(ctx, opts, stderr)
 	if err != nil {
 		return exitCodeRuntime, err
 	}
-	emitDiscoveryWarnings(stderr, state, opts.Quiet, opts.JSON)
 
 	runningCount := 0
 	for _, entry := range state.DockerEntries {
@@ -72,26 +68,22 @@ func runLS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 		for _, network := range state.Networks {
 			networkLabels = append(networkLabels, colorize(stdout, ansiCyan, network))
 		}
-
+		printTitle := func(text string, value int) {
+			fmt.Fprintf(stdout, "%s %s\n",
+				colorize(stdout, ansiBlue, text),
+				colorize(stdout, ansiGreen, strconv.Itoa(value)),
+			)
+		}
 		fmt.Fprintf(stdout, "%s %s\n",
 			colorize(stdout, ansiBlue, "networks:"),
 			strings.Join(networkLabels, ", "),
 		)
-		fmt.Fprintf(stdout, "%s %s\n",
-			colorize(stdout, ansiBlue, "compose_files:"),
-			colorize(stdout, ansiGreen, strconv.Itoa(len(state.ComposeFiles))),
-		)
+		printTitle("compose_files:", len(state.ComposeFiles))
 		for _, file := range state.ComposeFiles {
 			fmt.Fprintf(stdout, "  %s\n", colorize(stdout, ansiGray, file))
 		}
-		fmt.Fprintf(stdout, "%s %s\n",
-			colorize(stdout, ansiBlue, "static_ips:"),
-			colorize(stdout, ansiGreen, strconv.Itoa(len(state.ComposeEntries))),
-		)
-		fmt.Fprintf(stdout, "%s %s\n",
-			colorize(stdout, ansiBlue, "running_ips:"),
-			colorize(stdout, ansiGreen, strconv.Itoa(runningCount)),
-		)
+		printTitle("static_ips:", len(state.ComposeEntries))
+		printTitle("running_ips:", runningCount)
 	}
 
 	if state.Degraded {
@@ -111,25 +103,43 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 
 	var networkFilter string
 	var ipPrefix string
+	var groupName string
+	sortBy := "ip"
+	groupNumber := -1
 	var runningOnly bool
 	var composeOnly bool
+	var allInOne bool
 	addFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
 	addFlag(flagSet, &ipPrefix, "i", "ip-prefix", "", "ip prefix filter")
+	addGroupSelectionFlags(flagSet, &groupName, &groupNumber, "group filter")
+	addFlag(flagSet, &sortBy, "s", "sort", "ip", "sort order: ip|name")
 	addFlag(flagSet, &runningOnly, "r", "running", false, "only running")
 	addFlag(flagSet, &composeOnly, "c", "compose-only", false, "only compose entries")
+	addFlag(flagSet, &allInOne, "a", "all-in-one", false, "print one combined table")
 
-	if err := flagSet.Parse(args); err != nil {
+	if err := parseNoPositionalArgs(flagSet, args, "ps"); err != nil {
 		return exitCodeRuntime, err
 	}
-	if len(flagSet.Args()) > 0 {
-		return exitCodeRuntime, fmt.Errorf("unexpected args for ps: %v", flagSet.Args())
+	sortBy = strings.ToLower(strings.TrimSpace(sortBy))
+	if sortBy == "" {
+		sortBy = "ip"
 	}
-
-	state, err := discoverState(ctx, opts)
+	if sortBy != "ip" && sortBy != "name" {
+		return exitCodeRuntime, fmt.Errorf("invalid sort %q (expected ip|name)", sortBy)
+	}
+	selectedGroup, err := resolveGroupSelection(groupName, groupNumber, opts.Groups, opts.GroupOrder)
 	if err != nil {
 		return exitCodeRuntime, err
 	}
-	emitDiscoveryWarnings(stderr, state, opts.Quiet, opts.JSON)
+	if !opts.JSON && selectedGroup.Explicit {
+		fmt.Fprintln(stdout, colorize(stdout, ansiMagenta, selectedGroup.Name))
+	}
+	groupRange := selectedGroupRange(selectedGroup, opts.Groups)
+
+	state, err := discoverStateAndEmitWarnings(ctx, opts, stderr)
+	if err != nil {
+		return exitCodeRuntime, err
+	}
 
 	rows := buildPSRows(state.ComposeEntries, state.DockerEntries)
 	rows = resolveHostNetworkIPs(rows)
@@ -137,6 +147,12 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 	trimmedIPPrefix := strings.TrimSpace(ipPrefix)
 	filteredRows := make([]IPEntry, 0, len(rows))
 	for _, row := range rows {
+		if groupRange != nil {
+			addr, parseErr := netip.ParseAddr(strings.TrimSpace(row.IP))
+			if parseErr != nil || !ipInRange(addr, *groupRange) {
+				continue
+			}
+		}
 		if (trimmedNetworkFilter != "" && row.Network != trimmedNetworkFilter) ||
 			(trimmedIPPrefix != "" && !strings.HasPrefix(row.IP, trimmedIPPrefix)) ||
 			(runningOnly && !row.Running) ||
@@ -145,47 +161,32 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 		}
 		filteredRows = append(filteredRows, row)
 	}
-	sortPSRowsByIP(filteredRows)
+	sortEntries(filteredRows, sortBy)
 
 	if opts.JSON {
+		selectedGroupNumber := selectedGroupNumberPointer(selectedGroup)
 		payload := struct {
-			SchemaVersion string    `json:"schema_version"`
-			Command       string    `json:"command"`
-			ComposeOnly   bool      `json:"compose_only"`
-			Warnings      []string  `json:"warnings,omitempty"`
-			Entries       []IPEntry `json:"entries"`
+			SchemaVersion       string    `json:"schema_version"`
+			Command             string    `json:"command"`
+			ComposeOnly         bool      `json:"compose_only"`
+			SelectedGroup       string    `json:"selected_group,omitempty"`
+			SelectedGroupNumber *int      `json:"selected_group_number,omitempty"`
+			Warnings            []string  `json:"warnings,omitempty"`
+			Entries             []IPEntry `json:"entries"`
 		}{
-			SchemaVersion: schemaVersion,
-			Command:       "ps",
-			ComposeOnly:   state.Degraded,
-			Warnings:      state.Warnings,
-			Entries:       filteredRows,
+			SchemaVersion:       schemaVersion,
+			Command:             "ps",
+			ComposeOnly:         state.Degraded,
+			SelectedGroup:       selectedGroup.Name,
+			SelectedGroupNumber: selectedGroupNumber,
+			Warnings:            state.Warnings,
+			Entries:             filteredRows,
 		}
 		if err := writeJSON(stdout, payload); err != nil {
 			return exitCodeRuntime, err
 		}
-	} else {
-		rows := make([][]string, 0, len(filteredRows)+1)
-		rows = append(rows, []string{
-			colorize(stdout, ansiCyan, "CONTAINER"),
-			colorize(stdout, ansiCyan, "NETWORK"),
-			colorize(stdout, ansiCyan, "IP"),
-			colorize(stdout, ansiCyan, "RUNNING"),
-			colorize(stdout, ansiCyan, "SOURCE"),
-		})
-
-		for _, row := range filteredRows {
-			rows = append(rows, []string{
-				colorize(stdout, ansiBlue, psEntryName(row)),
-				row.Network,
-				psIPLabel(stdout, row.Network, row.IP),
-				runningLabel(stdout, row.Running),
-				sourceLabel(stdout, row.Source),
-			})
-		}
-		if err := printAlignedRows(stdout, rows); err != nil {
-			return exitCodeRuntime, err
-		}
+	} else if err := printPSRowsByGroup(stdout, filteredRows, opts.Groups, opts.GroupOrder, allInOne); err != nil {
+		return exitCodeRuntime, err
 	}
 
 	if state.Degraded {
@@ -205,52 +206,53 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 
 	var networkFilter string
 	var groupName string
+	groupNumber := -1
 	addFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
-	addFlag(flagSet, &groupName, "g", "group", "", "group filter")
+	addGroupSelectionFlags(flagSet, &groupName, &groupNumber, "group filter")
 
-	if err := flagSet.Parse(args); err != nil {
+	if err := parseNoPositionalArgs(flagSet, args, "check"); err != nil {
 		return exitCodeRuntime, err
 	}
-	if len(flagSet.Args()) > 0 {
-		return exitCodeRuntime, fmt.Errorf("unexpected args for check: %v", flagSet.Args())
-	}
 
-	state, err := discoverState(ctx, opts)
+	selectedGroup, err := resolveGroupSelection(groupName, groupNumber, opts.Groups, opts.GroupOrder)
 	if err != nil {
 		return exitCodeRuntime, err
 	}
-	emitDiscoveryWarnings(stderr, state, opts.Quiet, opts.JSON)
+	if !opts.JSON && selectedGroup.Explicit {
+		printSelectedGroupLine(stdout, selectedGroup)
+	}
 
+	state, err := discoverStateAndEmitWarnings(ctx, opts, stderr)
+	if err != nil {
+		return exitCodeRuntime, err
+	}
 	scopeNetworks := resolveScopedNetworks(networkFilter, nil, state.Networks, false)
 	scopeSet := make(map[string]struct{}, len(scopeNetworks))
 	for _, network := range scopeNetworks {
 		scopeSet[network] = struct{}{}
 	}
+	groupRange := selectedGroupRange(selectedGroup, opts.Groups)
 
-	var groupRange *IPRange
-	if strings.TrimSpace(groupName) != "" {
-		foundRange, ok := opts.Groups[groupName]
-		if !ok {
-			return exitCodeRuntime, fmt.Errorf("group %q not found", groupName)
-		}
-		groupRange = &foundRange
-	}
-
-	conflicts := collectCheckConflicts(state.ComposeEntries, state.DockerEntries, scopeSet, groupName, groupRange)
+	conflicts := collectCheckConflicts(state.ComposeEntries, state.DockerEntries, scopeSet, selectedGroup.Name, groupRange, opts.Groups)
 
 	if opts.JSON {
+		selectedGroupNumber := selectedGroupNumberPointer(selectedGroup)
 		payload := struct {
-			SchemaVersion string          `json:"schema_version"`
-			Command       string          `json:"command"`
-			ComposeOnly   bool            `json:"compose_only"`
-			Warnings      []string        `json:"warnings,omitempty"`
-			Conflicts     []checkConflict `json:"conflicts"`
+			SchemaVersion       string          `json:"schema_version"`
+			Command             string          `json:"command"`
+			ComposeOnly         bool            `json:"compose_only"`
+			SelectedGroup       string          `json:"selected_group,omitempty"`
+			SelectedGroupNumber *int            `json:"selected_group_number,omitempty"`
+			Warnings            []string        `json:"warnings,omitempty"`
+			Conflicts           []checkConflict `json:"conflicts"`
 		}{
-			SchemaVersion: schemaVersion,
-			Command:       "check",
-			ComposeOnly:   state.Degraded,
-			Warnings:      state.Warnings,
-			Conflicts:     conflicts,
+			SchemaVersion:       schemaVersion,
+			Command:             "check",
+			ComposeOnly:         state.Degraded,
+			SelectedGroup:       selectedGroup.Name,
+			SelectedGroupNumber: selectedGroupNumber,
+			Warnings:            state.Warnings,
+			Conflicts:           conflicts,
 		}
 		if err := writeJSON(stdout, payload); err != nil {
 			return exitCodeRuntime, err
@@ -259,13 +261,17 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 		if len(conflicts) == 0 {
 			fmt.Fprintln(stdout, successLine(stdout, "no conflicts"))
 		} else {
+			rows := make([][]string, 0, len(conflicts))
 			for _, conflict := range conflicts {
-				fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n",
+				rows = append(rows, []string{
 					conflictTypeLabel(stdout, conflict.Type),
 					conflict.Network,
 					colorize(stdout, ansiRed, conflict.IP),
 					strings.Join(conflict.Details, "; "),
-				)
+				})
+			}
+			if err := printAlignedRows(stdout, rows); err != nil {
+				return exitCodeRuntime, err
 			}
 		}
 	}
@@ -279,6 +285,92 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 	return exitCodeOK, nil
 }
 
+func printPSRowsByGroup(w io.Writer, entries []IPEntry, groups map[string]IPRange, configOrder []string, allInOne bool) error {
+	orderedGroups := orderedGroupNames(groups, configOrder)
+	if allInOne || len(entries) == 0 || len(orderedGroups) == 0 {
+		return printPSRowsTable(w, entries)
+	}
+
+	entriesByGroup := make(map[string][]IPEntry, len(orderedGroups))
+	unassignedEntries := make([]IPEntry, 0, len(entries))
+	for _, entry := range entries {
+		addr, err := netip.ParseAddr(strings.TrimSpace(entry.IP))
+		if err != nil {
+			unassignedEntries = append(unassignedEntries, entry)
+			continue
+		}
+		matchedGroup := findMatchingGroupName(addr, groups, orderedGroups)
+		if matchedGroup == "" {
+			unassignedEntries = append(unassignedEntries, entry)
+			continue
+		}
+		entriesByGroup[matchedGroup] = append(entriesByGroup[matchedGroup], entry)
+	}
+
+	rows := make([][]string, 0, len(entries)+len(orderedGroups)+4)
+	rows = append(rows, psTableHeaderRow(w))
+
+	printed := false
+	for _, groupName := range orderedGroups {
+		groupRows := entriesByGroup[groupName]
+		if len(groupRows) == 0 {
+			continue
+		}
+		if printed {
+			rows = append(rows, []string{"", "", "", "", ""})
+		}
+		rows = append(rows, psGroupLabelRow(w, groupName))
+		for _, row := range groupRows {
+			rows = append(rows, psTableEntryRow(w, row))
+		}
+		printed = true
+	}
+
+	if len(unassignedEntries) > 0 {
+		if printed {
+			rows = append(rows, []string{"", "", "", "", ""})
+		}
+		rows = append(rows, psGroupLabelRow(w, "unassigned"))
+		for _, row := range unassignedEntries {
+			rows = append(rows, psTableEntryRow(w, row))
+		}
+		printed = true
+	}
+
+	if !printed {
+		return printPSRowsTable(w, entries)
+	}
+	return printAlignedRows(w, rows)
+}
+
+func printPSRowsTable(w io.Writer, entries []IPEntry) error {
+	rows := make([][]string, 0, len(entries)+1)
+	rows = append(rows, psTableHeaderRow(w))
+
+	for _, row := range entries {
+		rows = append(rows, psTableEntryRow(w, row))
+	}
+	return printAlignedRows(w, rows)
+}
+
+func psTableHeaderRow(w io.Writer) []string {
+	return makeHeaders(w, "CONTAINER", "NETWORK", "IP", "RUNNING", "SOURCE")
+}
+
+func psTableEntryRow(w io.Writer, row IPEntry) []string {
+	return []string{
+		colorize(w, ansiBlue, psEntryName(row)),
+		row.Network,
+		psIPLabel(w, row.Network, row.IP),
+		runningLabel(w, row.Running),
+		sourceLabel(w, row.Source),
+	}
+}
+
+func psGroupLabelRow(w io.Writer, groupName string) []string {
+	return []string{colorize(w, ansiMagenta, groupName), "", "", "", ""}
+}
+
 func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout, stderr io.Writer) (int, error) {
 	if hasHelpArg(args) {
 		runHelp(stdout, []string{"nextFree"})
@@ -290,8 +382,9 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 
 	var groupName string
 	var networkFilter string
+	groupNumber := -1
 	count := 2
-	addFlag(flagSet, &groupName, "g", "group", "", "group name")
+	addGroupSelectionFlags(flagSet, &groupName, &groupNumber, "group name")
 	addFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
 
 	if err := flagSet.Parse(args); err != nil {
@@ -313,27 +406,23 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 		return exitCodeRuntime, errors.New("nextFree count must be > 0")
 	}
 
-	groupNames := make([]string, 0)
-	if strings.TrimSpace(groupName) != "" {
-		if _, ok := opts.Groups[groupName]; !ok {
-			return exitCodeRuntime, fmt.Errorf("group %q not found", groupName)
-		}
-		groupNames = append(groupNames, groupName)
-	} else {
-		for name := range opts.Groups {
-			groupNames = append(groupNames, name)
-		}
-		sort.Strings(groupNames)
+	selectedGroup, err := resolveGroupSelection(groupName, groupNumber, opts.Groups, opts.GroupOrder)
+	if err != nil {
+		return exitCodeRuntime, err
 	}
+	if !opts.JSON && selectedGroup.Explicit {
+		printSelectedGroupLine(stdout, selectedGroup)
+	}
+
+	groupNames := selectedOrOrderedGroupNames(selectedGroup, opts.Groups, opts.GroupOrder)
 	if len(groupNames) == 0 {
 		return exitCodeRuntime, errors.New("no groups configured")
 	}
 
-	state, err := discoverState(ctx, opts)
+	state, err := discoverStateAndEmitWarnings(ctx, opts, stderr)
 	if err != nil {
 		return exitCodeRuntime, err
 	}
-	emitDiscoveryWarnings(stderr, state, opts.Quiet, opts.JSON)
 
 	scopeNetworks := resolveScopedNetworks(networkFilter, opts.Networks, state.Networks, false)
 	if len(scopeNetworks) == 0 {
@@ -361,13 +450,6 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 		}
 	}
 
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Group != rows[j].Group {
-			return rows[i].Group < rows[j].Group
-		}
-		return rows[i].Network < rows[j].Network
-	})
-
 	notEnoughGroupList := make([]string, 0, len(notEnoughGroups))
 	for group := range notEnoughGroups {
 		notEnoughGroupList = append(notEnoughGroupList, group)
@@ -384,45 +466,29 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 		if notEnough {
 			warnings = append(warnings, notEnoughWarning)
 		}
+		selectedGroupNumber := selectedGroupNumberPointer(selectedGroup)
 		payload := struct {
-			SchemaVersion string          `json:"schema_version"`
-			Command       string          `json:"command"`
-			ComposeOnly   bool            `json:"compose_only"`
-			Warnings      []string        `json:"warnings,omitempty"`
-			Results       []freeResultRow `json:"results"`
+			SchemaVersion       string          `json:"schema_version"`
+			Command             string          `json:"command"`
+			ComposeOnly         bool            `json:"compose_only"`
+			SelectedGroup       string          `json:"selected_group,omitempty"`
+			SelectedGroupNumber *int            `json:"selected_group_number,omitempty"`
+			Warnings            []string        `json:"warnings,omitempty"`
+			Results             []freeResultRow `json:"results"`
 		}{
-			SchemaVersion: schemaVersion,
-			Command:       "nextFree",
-			ComposeOnly:   state.Degraded,
-			Warnings:      warnings,
-			Results:       rows,
+			SchemaVersion:       schemaVersion,
+			Command:             "nextFree",
+			ComposeOnly:         state.Degraded,
+			SelectedGroup:       selectedGroup.Name,
+			SelectedGroupNumber: selectedGroupNumber,
+			Warnings:            warnings,
+			Results:             rows,
 		}
 		if err := writeJSON(stdout, payload); err != nil {
 			return exitCodeRuntime, err
 		}
 	} else {
-		table := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(table, "%s\t%s\t%s\n",
-			colorize(stdout, ansiCyan, "GROUP"),
-			colorize(stdout, ansiCyan, "NETWORK"),
-			colorize(stdout, ansiCyan, "NEXT_FREE"),
-		)
-		for _, row := range rows {
-			nextValue := "-"
-			if len(row.IPs) > 0 {
-				nextValue = strings.Join(row.IPs, ", ")
-			}
-			nextValueOut := colorize(stdout, ansiGray, nextValue)
-			if nextValue != "-" {
-				nextValueOut = colorize(stdout, ansiGreen, nextValue)
-			}
-			fmt.Fprintf(table, "%s\t%s\t%s\n",
-				colorize(stdout, ansiBlue, row.Group),
-				colorize(stdout, ansiCyan, row.Network),
-				nextValueOut,
-			)
-		}
-		if err := table.Flush(); err != nil {
+		if err := printNextFreeTable(stdout, rows, groupNumber >= 0); err != nil {
 			return exitCodeRuntime, err
 		}
 		if notEnough {
@@ -451,11 +517,8 @@ func runSections(opts runtimeOptions, args []string, stdout, stderr io.Writer) (
 	addFlag(flagSet, &edit, "e", "edit", false, "open config in $EDITOR")
 	addFlag(flagSet, &validate, "v", "validate", false, "validate group overlaps")
 	addFlag(flagSet, &showPath, "p", "path", false, "print config file path")
-	if err := flagSet.Parse(args); err != nil {
+	if err := parseNoPositionalArgs(flagSet, args, "sections"); err != nil {
 		return exitCodeRuntime, err
-	}
-	if len(flagSet.Args()) > 0 {
-		return exitCodeRuntime, fmt.Errorf("unexpected args for sections: %v", flagSet.Args())
 	}
 	if showPath {
 		if opts.JSON {
@@ -477,7 +540,10 @@ func runSections(opts runtimeOptions, args []string, stdout, stderr io.Writer) (
 		return exitCodeOK, nil
 	}
 
-	config := &Config{Groups: opts.Groups}
+	config := &Config{
+		Groups:     opts.Groups,
+		GroupOrder: append([]string(nil), opts.GroupOrder...),
+	}
 	if edit {
 		editor := strings.TrimSpace(os.Getenv("EDITOR"))
 		if editor == "" {
@@ -498,23 +564,11 @@ func runSections(opts runtimeOptions, args []string, stdout, stderr io.Writer) (
 		config = loaded
 	}
 
-	groupRows := make([]struct {
-		Name  string `json:"name"`
-		Start string `json:"start"`
-		End   string `json:"end"`
-	}, 0, len(config.Groups))
-	groupNames := make([]string, 0, len(config.Groups))
-	for name := range config.Groups {
-		groupNames = append(groupNames, name)
-	}
-	sort.Strings(groupNames)
+	groupRows := make([]sectionRow, 0, len(config.Groups))
+	groupNames := orderedGroupNames(config.Groups, config.GroupOrder)
 	for _, groupName := range groupNames {
 		groupRange := config.Groups[groupName]
-		groupRows = append(groupRows, struct {
-			Name  string `json:"name"`
-			Start string `json:"start"`
-			End   string `json:"end"`
-		}{
+		groupRows = append(groupRows, sectionRow{
 			Name:  groupName,
 			Start: groupRange.Start.String(),
 			End:   groupRange.End.String(),
@@ -542,12 +596,16 @@ func runSections(opts runtimeOptions, args []string, stdout, stderr io.Writer) (
 			return exitCodeRuntime, err
 		}
 	} else {
-		table := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(table, "section\tstart\tend")
+		rows := make([][]string, 0, len(groupRows)+1)
+		rows = append(rows, makeHeaders(stdout, "SECTION", "START", "END"))
 		for _, row := range groupRows {
-			fmt.Fprintf(table, "%s\t%s\t%s\n", row.Name, row.Start, row.End)
+			rows = append(rows, []string{
+				colorize(stdout, ansiBlue, row.Name),
+				colorize(stdout, ansiYellow, row.Start),
+				colorize(stdout, ansiGreen, row.End),
+			})
 		}
-		if err := table.Flush(); err != nil {
+		if err := printAlignedRows(stdout, rows); err != nil {
 			return exitCodeRuntime, err
 		}
 		for _, validationError := range validationErrors {
@@ -589,7 +647,6 @@ func printAlignedRows(w io.Writer, rows [][]string) error {
 					return err
 				}
 			}
-
 			cell := ""
 			if idx < len(row) {
 				cell = row[idx]

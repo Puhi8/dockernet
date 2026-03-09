@@ -47,6 +47,7 @@ type runtimeOptions struct {
 	Networks     []string
 	IgnorePaths  []string
 	Groups       map[string]IPRange
+	GroupOrder   []string
 }
 
 type IPEntry struct {
@@ -100,7 +101,7 @@ type freeResultRow struct {
 func run(args []string, stdout, stderr io.Writer) (int, error) {
 	globals, err := parseGlobalFlags(args)
 	if err != nil {
-		printMainUsage(stdout)
+		writeHelpMenu(stdout, "main")
 		return exitCodeRuntime, err
 	}
 
@@ -132,18 +133,14 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 		return runPS(context.Background(), opts, globals.CommandArgs, stdout, stderr)
 	case "check":
 		return runCheck(context.Background(), opts, globals.CommandArgs, stdout, stderr)
-	case "nextFree", "nextfree":
+	case "nextFree", "nextfree", "next":
 		return runNextFree(context.Background(), opts, globals.CommandArgs, stdout, stderr)
 	case "sections":
 		return runSections(opts, globals.CommandArgs, stdout, stderr)
 	default:
-		printMainUsage(stdout)
+		writeHelpMenu(stdout, "main")
 		return exitCodeRuntime, fmt.Errorf("unknown command %q", globals.Command)
 	}
-}
-
-func printMainUsage(w io.Writer) {
-	writeHelpMenu(w, "main")
 }
 
 func parseGlobalFlags(args []string) (parsedGlobalFlags, error) {
@@ -214,6 +211,7 @@ func buildRuntimeOptions(globals parsedGlobalFlags, cfg *Config, configPath stri
 		Networks:    dedupeStrings(cfg.Networks),
 		IgnorePaths: append([]string(nil), cfg.IgnorePaths...),
 		Groups:      cfg.Groups,
+		GroupOrder:  append([]string(nil), cfg.GroupOrder...),
 	}
 
 	composeRoots, err := resolveComposeRoots(globals, cfg)

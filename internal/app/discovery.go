@@ -39,10 +39,9 @@ func discoverState(ctx context.Context, opts runtimeOptions) (*discoveryResult, 
 	networkSet := make(map[string]struct{})
 	for _, network := range opts.Networks {
 		network = strings.TrimSpace(network)
-		if network == "" || network == "none" {
-			continue
+		if network != "" && network != "none" {
+			networkSet[network] = struct{}{}
 		}
-		networkSet[network] = struct{}{}
 	}
 
 	for _, composeFile := range filteredComposeFiles {
@@ -50,23 +49,21 @@ func discoverState(ctx context.Context, opts runtimeOptions) (*discoveryResult, 
 
 		state.ComposeEntries = append(state.ComposeEntries, parsed.Entries...)
 		for _, network := range parsed.Networks {
-			if strings.TrimSpace(network) == "" || network == "none" {
-				continue
+			if strings.TrimSpace(network) != "" && network != "none" {
+				networkSet[network] = struct{}{}
 			}
-			networkSet[network] = struct{}{}
 		}
 	}
-	sortIPEntries(state.ComposeEntries)
+	sortEntries(state.ComposeEntries, "ip_entries")
 
 	dockerData := discoverDocker(ctx, opts.IncludeIPv6)
 	state.DockerEntries = dockerData.Entries
 	state.Warnings = append(state.Warnings, dockerData.Warnings...)
 	state.Degraded = !dockerData.Available
 	for _, network := range dockerData.Networks {
-		if strings.TrimSpace(network) == "" || network == "none" {
-			continue
+		if strings.TrimSpace(network) != "" && network != "none" {
+			networkSet[network] = struct{}{}
 		}
-		networkSet[network] = struct{}{}
 	}
 
 	for network := range networkSet {
@@ -102,10 +99,9 @@ func discoverDocker(ctx context.Context, includeIPv6 bool) dockerDiscovery {
 
 	for _, network := range networks {
 		name := strings.TrimSpace(network.Name)
-		if name == "" || name == "none" {
-			continue
+		if name != "" && name != "none" {
+			result.Networks = append(result.Networks, name)
 		}
-		result.Networks = append(result.Networks, name)
 	}
 	result.Networks = dedupeStrings(result.Networks)
 
@@ -154,7 +150,7 @@ func discoverDocker(ctx context.Context, includeIPv6 bool) dockerDiscovery {
 		}
 	}
 
-	sortIPEntries(result.Entries)
+	sortEntries(result.Entries, "ip_entries")
 	result.Available = true
 	return result
 }
@@ -178,10 +174,9 @@ func normalizeContainerName(names []string) string {
 	normalized := make([]string, 0, len(names))
 	for _, rawName := range names {
 		name := strings.TrimSpace(strings.TrimPrefix(rawName, "/"))
-		if name == "" {
-			continue
+		if name != "" {
+			normalized = append(normalized, name)
 		}
-		normalized = append(normalized, name)
 	}
 	if len(normalized) == 0 {
 		return ""
