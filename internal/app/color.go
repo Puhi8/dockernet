@@ -17,6 +17,7 @@ const (
 	ansiCyan    = "\033[36m"
 	ansiGray    = "\033[90m"
 )
+
 var colorEnabled = true
 
 func setColorEnabled(enabled bool) {
@@ -77,10 +78,13 @@ func runningLabel(w io.Writer, running bool) string {
 	return colorize(w, ansiGray, "no")
 }
 
-var sourceLabelMap = map[string]string{"both": ansiGreen, "docker": ansiBlue, "compose": ansiCyan}
+var labelsMap = map[string]map[string]string{
+	"source":   {"both": ansiGreen, "docker": ansiBlue, "compose": ansiCyan},
+	"conflict": {"duplicate_compose_ip": ansiRed, "running_ip_taken": ansiRed, "out_of_group": ansiYellow},
+}
 
-func sourceLabel(w io.Writer, source string) string {
-	color, ok := sourceLabelMap[source]
+func colorizeLabel(w io.Writer, source, label string) string {
+	color, ok := labelsMap[label][source]
 	if ok {
 		return colorize(w, color, source)
 	}
@@ -88,25 +92,12 @@ func sourceLabel(w io.Writer, source string) string {
 }
 
 func psIPLabel(w io.Writer, network, ip string) string {
-	trimmedIP := strings.TrimSpace(ip)
-	trimmedNetwork := strings.TrimSpace(network)
-	if strings.EqualFold(trimmedIP, "host") ||
-		strings.EqualFold(trimmedIP, "bridge") ||
-		strings.EqualFold(trimmedNetwork, "host") ||
-		strings.EqualFold(trimmedNetwork, "bridge") {
+	trimmedIP, trimmedNetwork := strings.TrimSpace(ip), strings.TrimSpace(network)
+	isHostOrBridge := strings.EqualFold(trimmedIP, "host") || strings.EqualFold(trimmedIP, "bridge") || strings.EqualFold(trimmedNetwork, "host") || strings.EqualFold(trimmedNetwork, "bridge")
+	if isHostOrBridge {
 		return colorize(w, ansiMagenta, ip)
 	}
 	return colorize(w, ansiYellow, ip)
-}
-
-var conflictTypeLabelMap = map[string]string{"duplicate_compose_ip": ansiRed, "running_ip_taken": ansiRed, "out_of_group": ansiYellow}
-
-func conflictTypeLabel(w io.Writer, conflictType string) string {
-	color, ok := conflictTypeLabelMap[conflictType]
-	if ok {
-		return colorize(w, color, conflictType)
-	}
-	return conflictType
 }
 
 func visibleWidth(text string) int {

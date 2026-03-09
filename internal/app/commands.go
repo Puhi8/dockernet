@@ -264,7 +264,7 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 			rows := make([][]string, 0, len(conflicts))
 			for _, conflict := range conflicts {
 				rows = append(rows, []string{
-					conflictTypeLabel(stdout, conflict.Type),
+					colorizeLabel(stdout, conflict.Type, "conflict"),
 					conflict.Network,
 					colorize(stdout, ansiRed, conflict.IP),
 					strings.Join(conflict.Details, "; "),
@@ -363,7 +363,7 @@ func psTableEntryRow(w io.Writer, row IPEntry) []string {
 		row.Network,
 		psIPLabel(w, row.Network, row.IP),
 		runningLabel(w, row.Running),
-		sourceLabel(w, row.Source),
+		colorizeLabel(w, row.Source, "source"),
 	}
 }
 
