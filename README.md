@@ -76,23 +76,6 @@ dockernet nextFree --group-number 1 2
 dockernet sections --validate
 ```
 
-## Large Docker Perf Dataset
-
-Generate and control a very large Compose dataset for stress-testing:
-
-```bash
-# Generate (default: 180 projects x 120 services = 21,600 service defs)
-bash docker/perf-dataset.sh generate
-
-# Launch enough stacks for ~3,000 running containers
-bash docker/perf-dataset.sh launch 3000
-
-# Stop/remove all launched perf stacks
-bash docker/perf-dataset.sh terminate
-```
-
-More details: [`docker/README.md`](docker/README.md)
-
 ## Configuration
 
 Default config path:
