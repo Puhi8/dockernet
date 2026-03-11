@@ -109,6 +109,8 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 	var runningOnly bool
 	var composeOnly bool
 	var allInOne bool
+	var showPorts bool
+	var showPortProtocols bool
 	addFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
 	addFlag(flagSet, &ipPrefix, "i", "ip-prefix", "", "ip prefix filter")
 	addGroupSelectionFlags(flagSet, &groupName, &groupNumber, "group filter")
@@ -116,9 +118,14 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 	addFlag(flagSet, &runningOnly, "r", "running", false, "only running")
 	addFlag(flagSet, &composeOnly, "c", "compose-only", false, "only compose entries")
 	addFlag(flagSet, &allInOne, "a", "all-in-one", false, "print one combined table")
+	addFlag(flagSet, &showPorts, "p", "ports", false, "include exposed/published ports column")
+	addFlag(flagSet, &showPortProtocols, "pp", "ports-protocol", false, "include protocol in ports column")
 
 	if err := parseNoPositionalArgs(flagSet, args, "ps"); err != nil {
 		return exitCodeRuntime, err
+	}
+	if showPortProtocols {
+		showPorts = true
 	}
 	sortBy = strings.ToLower(strings.TrimSpace(sortBy))
 	if sortBy == "" {
@@ -141,7 +148,7 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 		return exitCodeRuntime, err
 	}
 
-	rows := buildPSRows(state.ComposeEntries, state.DockerEntries)
+	rows := buildPSRows(state.ComposeEntries, state.DockerEntries, keyEntry)
 	rows = resolveHostNetworkIPs(rows)
 	trimmedNetworkFilter := strings.TrimSpace(networkFilter)
 	trimmedIPPrefix := strings.TrimSpace(ipPrefix)
@@ -161,7 +168,8 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 		}
 		filteredRows = append(filteredRows, row)
 	}
-	sortEntries(filteredRows, sortBy)
+	sortEntries(filteredRows, sortByStringMap[sortBy])
+	filteredRows = enrichPSRowsWithPorts(filteredRows, state.ComposePorts, state.DockerPorts, showPortProtocols, showPorts)
 
 	if opts.JSON {
 		selectedGroupNumber := selectedGroupNumberPointer(selectedGroup)
@@ -185,7 +193,7 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 		if err := writeJSON(stdout, payload); err != nil {
 			return exitCodeRuntime, err
 		}
-	} else if err := printPSRowsByGroup(stdout, filteredRows, opts.Groups, opts.GroupOrder, allInOne); err != nil {
+	} else if err := printPSRowsByGroup(stdout, filteredRows, opts.Groups, opts.GroupOrder, allInOne, showPorts); err != nil {
 		return exitCodeRuntime, err
 	}
 
@@ -285,10 +293,10 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 	return exitCodeOK, nil
 }
 
-func printPSRowsByGroup(w io.Writer, entries []IPEntry, groups map[string]IPRange, configOrder []string, allInOne bool) error {
+func printPSRowsByGroup(w io.Writer, entries []IPEntry, groups map[string]IPRange, configOrder []string, allInOne, showPorts bool) error {
 	orderedGroups := orderedGroupNames(groups, configOrder)
 	if allInOne || len(entries) == 0 || len(orderedGroups) == 0 {
-		return printPSRowsTable(w, entries)
+		return printPSRowsTable(w, entries, showPorts)
 	}
 
 	entriesByGroup := make(map[string][]IPEntry, len(orderedGroups))
@@ -308,7 +316,7 @@ func printPSRowsByGroup(w io.Writer, entries []IPEntry, groups map[string]IPRang
 	}
 
 	rows := make([][]string, 0, len(entries)+len(orderedGroups)+4)
-	rows = append(rows, psTableHeaderRow(w))
+	rows = append(rows, psTableHeaderRow(w, showPorts))
 
 	printed := false
 	for _, groupName := range orderedGroups {
@@ -317,58 +325,85 @@ func printPSRowsByGroup(w io.Writer, entries []IPEntry, groups map[string]IPRang
 			continue
 		}
 		if printed {
-			rows = append(rows, []string{"", "", "", "", ""})
+			rows = append(rows, psSpacerRow(showPorts))
 		}
-		rows = append(rows, psGroupLabelRow(w, groupName))
+		rows = append(rows, psGroupLabelRow(w, groupName, showPorts))
 		for _, row := range groupRows {
-			rows = append(rows, psTableEntryRow(w, row))
+			rows = append(rows, psTableEntryRow(w, row, showPorts))
 		}
 		printed = true
 	}
 
 	if len(unassignedEntries) > 0 {
 		if printed {
-			rows = append(rows, []string{"", "", "", "", ""})
+			rows = append(rows, psSpacerRow(showPorts))
 		}
-		rows = append(rows, psGroupLabelRow(w, "unassigned"))
+		rows = append(rows, psGroupLabelRow(w, "unassigned", showPorts))
 		for _, row := range unassignedEntries {
-			rows = append(rows, psTableEntryRow(w, row))
+			rows = append(rows, psTableEntryRow(w, row, showPorts))
 		}
 		printed = true
 	}
 
 	if !printed {
-		return printPSRowsTable(w, entries)
+		return printPSRowsTable(w, entries, showPorts)
 	}
 	return printAlignedRows(w, rows)
 }
 
-func printPSRowsTable(w io.Writer, entries []IPEntry) error {
+func printPSRowsTable(w io.Writer, entries []IPEntry, showPorts bool) error {
 	rows := make([][]string, 0, len(entries)+1)
-	rows = append(rows, psTableHeaderRow(w))
+	rows = append(rows, psTableHeaderRow(w, showPorts))
 
 	for _, row := range entries {
-		rows = append(rows, psTableEntryRow(w, row))
+		rows = append(rows, psTableEntryRow(w, row, showPorts))
 	}
 	return printAlignedRows(w, rows)
 }
 
-func psTableHeaderRow(w io.Writer) []string {
+func psTableHeaderRow(w io.Writer, showPorts bool) []string {
+	if showPorts {
+		return makeHeaders(w, "CONTAINER", "NETWORK", "IP", "PORTS", "RUNNING", "SOURCE")
+	}
 	return makeHeaders(w, "CONTAINER", "NETWORK", "IP", "RUNNING", "SOURCE")
 }
 
-func psTableEntryRow(w io.Writer, row IPEntry) []string {
-	return []string{
+func psEntryName(entry IPEntry) string {
+	name := getEntryName(entry)
+	if name == "" {
+		return "-"
+	}
+	return name
+}
+
+func psTableEntryRow(w io.Writer, row IPEntry, showPorts bool) []string {
+	values := []string{
 		colorize(w, ansiBlue, psEntryName(row)),
 		row.Network,
 		psIPLabel(w, row.Network, row.IP),
+	}
+	if showPorts {
+		values = append(values, psPortsLabel(w, row.Ports))
+	}
+	values = append(values,
 		runningLabel(w, row.Running),
 		colorizeLabel(w, row.Source, "source"),
-	}
+	)
+	return values
 }
 
-func psGroupLabelRow(w io.Writer, groupName string) []string {
+func psGroupLabelRow(w io.Writer, groupName string, showPorts bool) []string {
+	if showPorts {
+		return []string{colorize(w, ansiMagenta, groupName), "", "", "", "", ""}
+	}
 	return []string{colorize(w, ansiMagenta, groupName), "", "", "", ""}
+}
+
+func psSpacerRow(showPorts bool) []string {
+	if showPorts {
+		return []string{"", "", "", "", "", ""}
+	}
+	return []string{"", "", "", "", ""}
 }
 
 func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout, stderr io.Writer) (int, error) {

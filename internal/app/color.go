@@ -100,6 +100,22 @@ func psIPLabel(w io.Writer, network, ip string) string {
 	return colorize(w, ansiYellow, ip)
 }
 
+func psPortsLabel(w io.Writer, ports []string) string {
+	if len(ports) == 0 {
+		return colorize(w, ansiGray, "-")
+	}
+
+	labels := make([]string, 0, len(ports))
+	for _, port := range ports {
+		if strings.Contains(port, "->") {
+			labels = append(labels, colorize(w, ansiGreen, port))
+			continue
+		}
+		labels = append(labels, colorize(w, ansiGray, port))
+	}
+	return strings.Join(labels, ", ")
+}
+
 func visibleWidth(text string) int {
 	isANSIFinalByte := func(b byte) bool {
 		return b >= 0x40 && b <= 0x7E

@@ -51,21 +51,31 @@ type runtimeOptions struct {
 }
 
 type IPEntry struct {
-	Network       string `json:"network"`
-	IP            string `json:"ip"`
-	IPVersion     int    `json:"ip_version"`
-	Service       string `json:"service,omitempty"`
-	ContainerName string `json:"container_name,omitempty"`
-	Project       string `json:"project,omitempty"`
-	ComposeFile   string `json:"compose_file,omitempty"`
-	Running       bool   `json:"running"`
-	Source        string `json:"source"`
+	Network       string   `json:"network,omitempty"`
+	IP            string   `json:"ip,omitempty"`
+	IPVersion     int      `json:"ip_version,omitempty"`
+	Protocol      string   `json:"protocol,omitempty"`
+	ContainerPort int      `json:"container_port,omitempty"`
+	HostIP        string   `json:"host_ip,omitempty"`
+	HostPort      int      `json:"host_port,omitempty"`
+	Published     bool     `json:"published,omitempty"`
+	Origin        string   `json:"origin,omitempty"`
+	Service       string   `json:"service,omitempty"`
+	ContainerName string   `json:"container_name,omitempty"`
+	Project       string   `json:"project,omitempty"`
+	ComposeFile   string   `json:"compose_file,omitempty"`
+	Ports         []string `json:"ports,omitempty"`
+	HasPorts      bool     `json:"has_ports,omitempty"`
+	Running       bool     `json:"running"`
+	Source        string   `json:"source"`
 }
 
 type discoveryResult struct {
 	ComposeFiles   []string  `json:"compose_files"`
 	ComposeEntries []IPEntry `json:"compose_entries"`
+	ComposePorts   []IPEntry `json:"compose_ports"`
 	DockerEntries  []IPEntry `json:"docker_entries"`
+	DockerPorts    []IPEntry `json:"docker_ports"`
 	Networks       []string  `json:"networks"`
 	Warnings       []string  `json:"warnings"`
 	Degraded       bool      `json:"compose_only"`
@@ -73,13 +83,16 @@ type discoveryResult struct {
 
 type composeParseResult struct {
 	Entries     []IPEntry
+	Ports       []IPEntry
 	Networks    []string
 	VolumePaths []string
+	Warnings    []string
 	IsCompose   bool
 }
 
 type dockerDiscovery struct {
 	Entries   []IPEntry
+	Ports     []IPEntry
 	Networks  []string
 	Warnings  []string
 	Available bool

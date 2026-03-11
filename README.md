@@ -5,6 +5,7 @@ Docker + Compose IP discovery, conflict checks, and free IP allocation for self-
 ## Features
 
 - Discovers IP usage from Docker runtime and Compose files
+- Optional `ps --ports` view for published and exposed container ports
 - Detects duplicate/static-IP conflicts
 - Finds next-free addresses from configured IP groups / ranges
 - Falls back to compose-only mode when Docker is unavailable
@@ -53,6 +54,12 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o dockernet .
 # List running entries in bridge network
 dockernet ps --running --network bridge
 
+# Include published/exposed ports in ps output
+dockernet ps --ports
+
+# Optional: include protocol in ports output
+dockernet ps --ports --ports-protocol
+
 # Check conflicts only in one network
 dockernet check --network bridge
 
@@ -68,6 +75,23 @@ dockernet nextFree --group-number 1 2
 # Validate group overlaps/ranges
 dockernet sections --validate
 ```
+
+## Large Docker Perf Dataset
+
+Generate and control a very large Compose dataset for stress-testing:
+
+```bash
+# Generate (default: 180 projects x 120 services = 21,600 service defs)
+bash docker/perf-dataset.sh generate
+
+# Launch enough stacks for ~3,000 running containers
+bash docker/perf-dataset.sh launch 3000
+
+# Stop/remove all launched perf stacks
+bash docker/perf-dataset.sh terminate
+```
+
+More details: [`docker/README.md`](docker/README.md)
 
 ## Configuration
 

@@ -153,6 +153,14 @@ func resolveGroupSelection(groupName string, groupNumber int, groups map[string]
 	return selected, nil
 }
 
+func getEntryName(entry IPEntry) string {
+	name := strings.TrimSpace(entry.ContainerName)
+	if name == "" {
+		name = strings.TrimSpace(entry.Service)
+	}
+	return name
+}
+
 func printSelectedGroupLine(w io.Writer, selected groupSelection) {
 	if !selected.Explicit {
 		return
@@ -223,82 +231,117 @@ func ipInRange(addr netip.Addr, groupRange IPRange) bool {
 	return addr.Is4() == groupRange.Start.Is4() && addr.Compare(groupRange.Start) >= 0 && addr.Compare(groupRange.End) <= 0
 }
 
-func sortEntries(entries []IPEntry, style string) {
-	psSortName := func(entry IPEntry) string {
-		name := strings.TrimSpace(entry.ContainerName)
-		if name == "" {
-			name = strings.TrimSpace(entry.Service)
+type SortType uint8
+
+const (
+	SortName SortType = iota
+	SortIP
+	SortIPEntries
+	SortPort
+)
+
+var sortByStringMap = map[string]SortType{"name": SortName, "ip": SortIP, "ip_entries": SortIPEntries, "port": SortPort}
+
+func sortEntries(entries []IPEntry, style SortType) {
+	compareByString := func(left, right string) (bool, bool) {
+		if left != right {
+			return left < right, true
 		}
-		return name
+		return false, false
 	}
+
 	sort.Slice(entries, func(i, j int) bool {
-		nameI := psSortName(entries[i])
-		nameJ := psSortName(entries[j])
+		left, right := entries[i], entries[j]
 		cmpName := func() (bool, bool) {
-			if nameI != nameJ {
-				return nameI < nameJ, true
-			}
-			return false, false
+			return compareByString(getEntryName(left), getEntryName(right))
 		}
-		cmpNet := func() (bool, bool) {
-			if entries[i].Network != entries[j].Network {
-				return entries[i].Network < entries[j].Network, true
-			}
-			return false, false
+		cmpService := func() (bool, bool) {
+			return compareByString(strings.TrimSpace(left.Service), strings.TrimSpace(right.Service))
+		}
+		cmpNetwork := func() (bool, bool) {
+			return compareByString(left.Network, right.Network)
 		}
 		cmpIP := func() (bool, bool) {
-			if cmp := compareIPStrings(entries[i].IP, entries[j].IP); cmp != 0 {
+			if cmp := compareIPStrings(left.IP, right.IP); cmp != 0 {
 				return cmp < 0, true
 			}
 			return false, false
 		}
 		cmpIPVersion := func() (bool, bool) {
-			if entries[i].IPVersion != entries[j].IPVersion {
-				return entries[i].IPVersion < entries[j].IPVersion, true
+			if left.IPVersion != right.IPVersion {
+				return left.IPVersion < right.IPVersion, true
 			}
 			return false, false
 		}
 		cmpRunning := func() (bool, bool) {
-			if entries[i].Running != entries[j].Running {
-				return entries[i].Running && !entries[j].Running, true
+			if left.Running != right.Running {
+				return left.Running && !right.Running, true
 			}
 			return false, false
 		}
 		cmpSource := func() (bool, bool) {
-			if entries[i].Source != entries[j].Source {
-				return entries[i].Source < entries[j].Source, true
-			}
-			return false, false
+			return compareByString(left.Source, right.Source)
 		}
 		cmpProject := func() (bool, bool) {
-			if entries[i].Project != entries[j].Project {
-				return entries[i].Project < entries[j].Project, true
-			}
-			return false, false
+			return compareByString(left.Project, right.Project)
 		}
 		cmpComposeFile := func() (bool, bool) {
-			if entries[i].ComposeFile != entries[j].ComposeFile {
-				return entries[i].ComposeFile < entries[j].ComposeFile, true
+			return compareByString(left.ComposeFile, right.ComposeFile)
+		}
+		cmpContainerPort := func() (bool, bool) {
+			if left.ContainerPort != right.ContainerPort {
+				return left.ContainerPort < right.ContainerPort, true
 			}
 			return false, false
 		}
-
-		var order []func() (bool, bool)
-		switch style {
-		case "name":
-			order = []func() (bool, bool){cmpName, cmpNet, cmpIP, cmpRunning, cmpSource, cmpProject, cmpComposeFile}
-		case "ip":
-			order = []func() (bool, bool){cmpIP, cmpNet, cmpName, cmpRunning, cmpSource, cmpProject, cmpComposeFile}
-		case "ip_entries":
-			order = []func() (bool, bool){cmpNet, cmpIPVersion, cmpIP, cmpSource, cmpName, cmpRunning, cmpProject, cmpComposeFile}
-		default:
-			order = []func() (bool, bool){cmpIP, cmpNet, cmpName, cmpRunning, cmpSource, cmpProject, cmpComposeFile}
+		cmpProtocol := func() (bool, bool) {
+			return compareByString(normalizePortProtocol(left.Protocol), normalizePortProtocol(right.Protocol))
 		}
-		for _, cmp := range order {
-			if res, ok := cmp(); ok {
-				return res
+		cmpPublished := func() (bool, bool) {
+			if left.Published != right.Published {
+				return left.Published && !right.Published, true
+			}
+			return false, false
+		}
+		cmpHostIP := func() (bool, bool) {
+			return compareByString(strings.TrimSpace(left.HostIP), strings.TrimSpace(right.HostIP))
+		}
+		cmpHostPort := func() (bool, bool) {
+			if left.HostPort != right.HostPort {
+				return left.HostPort < right.HostPort, true
+			}
+			return false, false
+		}
+		cmpOrigin := func() (bool, bool) {
+			return compareByString(strings.TrimSpace(left.Origin), strings.TrimSpace(right.Origin))
+		}
+
+		var compares []func() (bool, bool)
+		switch style {
+		case SortName:
+			compares = []func() (bool, bool){cmpName, cmpNetwork, cmpIP, cmpRunning, cmpSource, cmpProject, cmpComposeFile}
+		case SortIP:
+			compares = []func() (bool, bool){cmpIP, cmpNetwork, cmpName, cmpRunning, cmpSource, cmpProject, cmpComposeFile}
+		case SortIPEntries:
+			compares = []func() (bool, bool){cmpNetwork, cmpIPVersion, cmpIP, cmpSource, cmpName, cmpRunning, cmpProject, cmpComposeFile}
+		case SortPort:
+			compares = []func() (bool, bool){cmpProject, cmpService, cmpContainerPort, cmpProtocol, cmpPublished, cmpHostIP, cmpHostPort, cmpOrigin, cmpSource, cmpName, cmpComposeFile}
+		default:
+			compares = []func() (bool, bool){cmpIP, cmpNetwork, cmpName, cmpRunning, cmpSource, cmpProject, cmpComposeFile}
+		}
+		for _, cmp := range compares {
+			if result, ok := cmp(); ok {
+				return result
 			}
 		}
 		return false
 	})
+}
+
+func normalizePortProtocol(raw string) string {
+	protocol := strings.ToLower(strings.TrimSpace(raw))
+	if protocol == "" {
+		return "tcp"
+	}
+	return protocol
 }
