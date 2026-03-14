@@ -536,13 +536,9 @@ func parseComposePortRange(raw string, allowZero bool) (int, int, bool) {
 
 func parseComposePortNumber(raw string, allowZero bool) (int, bool) {
 	value, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil {
-		return 0, false
-	}
-	if value < 0 || value > 65535 {
-		return 0, false
-	}
-	if !allowZero && value == 0 {
+	if err != nil ||
+		(value < 0 || value > 65535) ||
+		(!allowZero && value == 0) {
 		return 0, false
 	}
 	return value, true
@@ -573,7 +569,6 @@ func resolveComposeProjectName(document *yaml.Node, composeDir string, dotenv ma
 	if configured := strings.TrimSpace(yamlScalar(yamlMapLookup(document, "name"))); configured != "" {
 		return configured
 	}
-
 	if fromEnv := strings.TrimSpace(os.Getenv("COMPOSE_PROJECT_NAME")); fromEnv != "" {
 		return fromEnv
 	}
@@ -595,8 +590,8 @@ func loadDotEnvFile(composeDir string) (map[string]string, error) {
 		return nil, err
 	}
 
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(string(data), "\n")
+	for line := range lines {
 		raw := strings.TrimSpace(line)
 		if raw == "" || strings.HasPrefix(raw, "#") {
 			continue
@@ -610,9 +605,8 @@ func loadDotEnvFile(composeDir string) (map[string]string, error) {
 			continue
 		}
 		key = strings.TrimSpace(key)
-		value = strings.Trim(strings.TrimSpace(value), `"'`)
 		if key != "" {
-			result[key] = value
+			result[key] = strings.Trim(strings.TrimSpace(value), `"'`)
 		}
 	}
 	return result, nil
@@ -768,18 +762,15 @@ func resolveBindSourcePath(source, composeDir string) string {
 	if source == "" {
 		return ""
 	}
-
 	if strings.HasPrefix(source, "~") {
 		home, err := os.UserHomeDir()
 		if err == nil {
 			source = filepath.Join(home, strings.TrimPrefix(source, "~"))
 		}
 	}
-
 	if filepath.IsAbs(source) {
 		return filepath.Clean(source)
 	}
-
 	if strings.HasPrefix(source, ".") || strings.Contains(source, string(os.PathSeparator)) {
 		return filepath.Clean(filepath.Join(composeDir, source))
 	}
@@ -787,8 +778,8 @@ func resolveBindSourcePath(source, composeDir string) string {
 }
 
 func hasTopLevelServicesKey(data []byte) bool {
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(string(data), "\n")
+	for line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" ||
 			strings.HasPrefix(trimmed, "#") ||
@@ -800,7 +791,6 @@ func hasTopLevelServicesKey(data []byte) bool {
 		if !ok {
 			continue
 		}
-
 		if strings.TrimSpace(key) == "services" {
 			return true
 		}
@@ -813,13 +803,8 @@ func normalizeValidIP(raw string, version int) string {
 	if raw == "" {
 		return ""
 	}
-
 	addr, err := netip.ParseAddr(raw)
-	if err != nil {
-		return ""
-	}
-
-	if (version == 4 && !addr.Is4()) || (version == 6 && !addr.Is6()) {
+	if err != nil || (version == 4 && !addr.Is4()) || (version == 6 && !addr.Is6()) {
 		return ""
 	}
 	return addr.String()

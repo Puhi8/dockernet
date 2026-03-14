@@ -7,14 +7,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Puhi8/dockernet/internal/app/terminal"
 )
 
 var defaultIgnorePaths = []string{
 	".vscode",
 	".vscode-server",
+	".git",
+	"node_modules",
 }
 
 func discoverComposeFiles(roots []string, ignorePaths []string) ([]string, []string) {
+	defer terminalOut.PerfStart("Discover compose files")()
 	ignoreRules := normalizeIgnorePaths(append(append([]string(nil), defaultIgnorePaths...), ignorePaths...))
 
 	warnings := make([]string, 0)
@@ -27,18 +32,15 @@ func discoverComposeFiles(roots []string, ignorePaths []string) ([]string, []str
 		if root == "" {
 			return
 		}
-
 		absRoot, err := filepath.Abs(root)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("resolve root %q: %v", root, err))
 			return
 		}
-
-		realRoot, err := filepath.EvalSymlinks(absRoot)
+		realRoot, err := filepath.EvalSymlinks(absRoot) // support symlink 
 		if err == nil {
 			absRoot = realRoot
 		}
-
 		if _, seen := visitedDirs[absRoot]; seen {
 			return
 		}
@@ -51,16 +53,19 @@ func discoverComposeFiles(roots []string, ignorePaths []string) ([]string, []str
 				}
 				return nil
 			}
-
+			isDir := entry.IsDir()
+			isSymlink := entry.Type()&os.ModeSymlink != 0
+			if !isDir && !isSymlink && !isComposeFile(path) {
+				return nil // return for unsupported entries
+			}
 			cleanPath := filepath.Clean(path)
 			if shouldIgnorePath(cleanPath, ignoreRules) {
-				if entry.IsDir() {
+				if isDir {
 					return filepath.SkipDir
 				}
 				return nil
 			}
-
-			if entry.Type()&os.ModeSymlink != 0 {
+			if isSymlink {
 				resolved, err := filepath.EvalSymlinks(path)
 				if err != nil {
 					if !os.IsNotExist(err) {
@@ -68,7 +73,6 @@ func discoverComposeFiles(roots []string, ignorePaths []string) ([]string, []str
 					}
 					return nil
 				}
-
 				info, err := os.Stat(resolved)
 				if err != nil {
 					if !os.IsNotExist(err) {
@@ -76,38 +80,23 @@ func discoverComposeFiles(roots []string, ignorePaths []string) ([]string, []str
 					}
 					return nil
 				}
-
 				if info.IsDir() {
 					walkRoot(resolved)
-					if entry.IsDir() {
+					if isDir {
 						return filepath.SkipDir
 					}
 					return nil
 				}
-
 				if isComposeFile(path) || isComposeFile(resolved) {
-					absFile, absErr := filepath.Abs(resolved)
-					if absErr == nil {
-						files[absFile] = struct{}{}
-					} else {
-						files[filepath.Clean(resolved)] = struct{}{}
-					}
+					files[normalizeDiscoveredFilePath(resolved)] = struct{}{}
 				}
 				return nil
 			}
 
-			if entry.IsDir() {
+			if isDir {
 				return nil
 			}
-
-			if isComposeFile(path) {
-				absFile, absErr := filepath.Abs(path)
-				if absErr == nil {
-					files[absFile] = struct{}{}
-				} else {
-					files[filepath.Clean(path)] = struct{}{}
-				}
-			}
+			files[normalizeDiscoveredFilePath(path)] = struct{}{}
 			return nil
 		})
 		if walkErr != nil {
@@ -125,6 +114,14 @@ func discoverComposeFiles(roots []string, ignorePaths []string) ([]string, []str
 	}
 	sort.Strings(discovered)
 	return discovered, warnings
+}
+
+func normalizeDiscoveredFilePath(path string) string {
+	absPath, err := filepath.Abs(path) // not checking "IsAbs" because Abs does that internally
+	if err == nil {
+		return absPath
+	}
+	return path
 }
 
 func filterComposeFilesByVolumePaths(files []string, volumePaths []string) []string {

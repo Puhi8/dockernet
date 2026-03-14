@@ -10,13 +10,15 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/Puhi8/dockernet/internal/app/terminal"
 )
 
 const groupNumberFlagUsage = "group number (0-based, config order)"
 
 func addGroupSelectionFlags(flagSet *flag.FlagSet, groupName *string, groupNumber *int, groupUsage string) {
-	addFlag(flagSet, groupName, "g", "group", "", groupUsage)
-	addFlag(flagSet, groupNumber, "gn", "group-number", -1, groupNumberFlagUsage)
+	terminalOut.AddFlag(flagSet, groupName, "g", "group", "", groupUsage)
+	terminalOut.AddFlag(flagSet, groupNumber, "gn", "group-number", -1, groupNumberFlagUsage)
 }
 
 func parseNoPositionalArgs(flagSet *flag.FlagSet, args []string, commandName string) error {
@@ -40,15 +42,15 @@ func discoverStateAndEmitWarnings(ctx context.Context, opts runtimeOptions, stde
 
 func nextFreeValueLabel(w io.Writer, ips []string) string {
 	if len(ips) == 0 {
-		return colorize(w, ansiGray, "-")
+		return terminalOut.Colorize(w, terminalOut.ANSIGray, "-")
 	}
-	return colorize(w, ansiGreen, strings.Join(ips, ", "))
+	return terminalOut.Colorize(w, terminalOut.ANSIGreen, strings.Join(ips, ", "))
 }
 
 func makeHeaders(w io.Writer, titles ...string) []string {
 	headers := make([]string, 0, len(titles))
 	for _, title := range titles {
-		headers = append(headers, colorize(w, ansiCyan, title))
+		headers = append(headers, terminalOut.Colorize(w, terminalOut.ANSICyan, title))
 	}
 	return headers
 }
@@ -62,14 +64,14 @@ func printNextFreeTable(w io.Writer, rows []freeResultRow, singleGroupView bool)
 	for _, row := range rows {
 		if singleGroupView {
 			fmt.Fprintf(table, "%s\t%s\n",
-				colorize(w, ansiCyan, row.Network),
+				terminalOut.Colorize(w, terminalOut.ANSICyan, row.Network),
 				nextFreeValueLabel(w, row.IPs),
 			)
 			continue
 		}
 		fmt.Fprintf(table, "%s\t%s\t%s\n",
-			colorize(w, ansiBlue, row.Group),
-			colorize(w, ansiCyan, row.Network),
+			terminalOut.Colorize(w, terminalOut.ANSIBlue, row.Group),
+			terminalOut.Colorize(w, terminalOut.ANSICyan, row.Network),
 			nextFreeValueLabel(w, row.IPs),
 		)
 	}
@@ -92,8 +94,7 @@ func selectedGroupNumberPointer(selected groupSelection) *int {
 	if !selected.Explicit || selected.Number < 0 {
 		return nil
 	}
-	value := selected.Number
-	return &value
+	return &selected.Number
 }
 
 func selectedGroupRange(selected groupSelection, groups map[string]IPRange) *IPRange {
@@ -124,9 +125,7 @@ func resolveGroupSelection(groupName string, groupNumber int, groups map[string]
 	if groupName == "" && groupNumber == -1 {
 		return selected, nil
 	}
-
 	ordered := orderedGroupNames(groups, configOrder)
-
 	if groupName != "" {
 		if _, ok := groups[groupName]; !ok {
 			return selected, fmt.Errorf("group %q not found", groupName)
@@ -136,7 +135,6 @@ func resolveGroupSelection(groupName string, groupNumber int, groups map[string]
 		selected.Explicit = true
 		return selected, nil
 	}
-
 	if groupNumber < 0 {
 		return selected, errors.New("group number must be >= 0")
 	}
@@ -169,7 +167,7 @@ func printSelectedGroupLine(w io.Writer, selected groupSelection) {
 	if selected.Number >= 0 {
 		label = fmt.Sprintf("%s (#%d)", selected.Name, selected.Number)
 	}
-	fmt.Fprintf(w, "%s %s\n", colorize(w, ansiBlue, "group:"), colorize(w, ansiMagenta, label))
+	fmt.Fprintf(w, "%s %s\n", terminalOut.Colorize(w, terminalOut.ANSIBlue, "group:"), terminalOut.Colorize(w, terminalOut.ANSIMagenta, label))
 }
 
 func indexOfString(values []string, needle string) int {
@@ -205,7 +203,6 @@ func orderedGroupNames(groups map[string]IPRange, configOrder []string) []string
 		}
 	}
 	sort.Strings(extras)
-
 	return append(ordered, extras...)
 }
 

@@ -1,6 +1,6 @@
 NETWORKS="bridge,host"
 COMPOSE_ROOTS="/var/composeFiles,/home/username/projects"
-IGNORE_PATHS="node_modules,.git,volumes,data"
+IGNORE_PATHS="volumes,data"
 ENABLE_IPV6="false"
 ENABLE_COLOR="true"
 

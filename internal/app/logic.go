@@ -9,9 +9,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Puhi8/dockernet/internal/app/terminal"
 )
 
 func buildPSRows(composeEntries, dockerEntries []IPEntry, key keyKind) []IPEntry {
+	defer terminalOut.PerfStart("Build PS rows")()
+
 	rows := make([]IPEntry, 0, len(composeEntries)+len(dockerEntries))
 	dockerIndex := buildPSMatchIndex(
 		dockerEntries,
@@ -22,8 +26,7 @@ func buildPSRows(composeEntries, dockerEntries []IPEntry, key keyKind) []IPEntry
 
 	var sortType SortType
 	var dedupe func([]IPEntry) []IPEntry
-	var preliminaryFactory func(IPEntry) func(int) bool
-	var fallbackFactory func(IPEntry) func(int) bool
+	var preliminaryFactory, fallbackFactory func(IPEntry) func(int) bool
 	matchesCompose := func(entry IPEntry) func(int) bool {
 		return func(idx int) bool {
 			return ownerMatchesCompose(entry.ContainerName, entry.Project, entry.Service, dockerEntries[idx].ContainerName)
@@ -49,6 +52,7 @@ func buildPSRows(composeEntries, dockerEntries []IPEntry, key keyKind) []IPEntry
 	default:
 		panic("Unsupported key when building ps rows!")
 	}
+	matchComposeDone := terminalOut.PerfStart("Build PS rows: match compose entries")
 	for _, composeEntry := range composeEntries {
 		var preliminaryPredicate func(int) bool
 		if preliminaryFactory != nil {
@@ -94,9 +98,12 @@ func buildPSRows(composeEntries, dockerEntries []IPEntry, key keyKind) []IPEntry
 		}
 		rows = append(rows, row)
 	}
+	matchComposeDone()
+	finalizeDone := terminalOut.PerfStart("Build PS rows: finalize")
 	rows = appendUnmatchedEntries(rows, dockerEntries, matchedDocker)
 	rows = dedupe(rows)
 	sortEntries(rows, sortType)
+	finalizeDone()
 	return rows
 }
 
@@ -266,6 +273,8 @@ func psComposeIdentity(entry IPEntry) string {
 }
 
 func enrichPSRowsWithPorts(rows []IPEntry, composePorts, dockerPorts []IPEntry, includeProtocol, includeSummaries bool) []IPEntry {
+	defer terminalOut.PerfStart("Enrich PS rows with ports")()
+
 	if len(rows) == 0 {
 		return rows
 	}
@@ -277,6 +286,7 @@ func enrichPSRowsWithPorts(rows []IPEntry, composePorts, dockerPorts []IPEntry, 
 
 	enriched := make([]IPEntry, len(rows))
 	copy(enriched, rows)
+	attachSummariesDone := terminalOut.PerfStart("Enrich PS rows with ports: attach summaries")
 	for idx, row := range enriched {
 		summaries := collectPortSummariesForPSRow(row, mergedPorts, includeProtocol)
 		if len(summaries) > 0 {
@@ -286,6 +296,7 @@ func enrichPSRowsWithPorts(rows []IPEntry, composePorts, dockerPorts []IPEntry, 
 			}
 		}
 	}
+	attachSummariesDone()
 	return enriched
 }
 
@@ -410,13 +421,13 @@ func dockerPortConfigMatchesCompose(composeEntry, dockerEntry IPEntry) bool {
 }
 
 func collectCheckConflicts(
-	composeEntries,
-	dockerEntries []IPEntry,
+	composeEntries, dockerEntries []IPEntry,
 	scopeNetworks map[string]struct{},
 	groupName string,
 	groupRange *IPRange,
 	groups map[string]IPRange,
 ) []checkConflict {
+	defer terminalOut.PerfStart("Collect check conflicts")()
 	conflicts := make([]checkConflict, 0)
 
 	filteredCompose := make([]IPEntry, 0, len(composeEntries))
@@ -426,6 +437,7 @@ func collectCheckConflicts(
 			filteredCompose = append(filteredCompose, composeEntry)
 		}
 	}
+	terminalOut.PerfStart("Collect check conflicts: filter compose")()
 
 	if groupRange != nil {
 		inRangeCompose := make([]IPEntry, 0, len(filteredCompose))
@@ -456,20 +468,21 @@ func collectCheckConflicts(
 		}
 		filteredCompose = inAnyGroupCompose
 	}
+	terminalOut.PerfStart("Collect check conflicts: apply group filter")()
 
 	composeByKey := make(map[string][]IPEntry)
 	for _, composeEntry := range filteredCompose {
 		composeByKey[makeKey(composeEntry, keyEntry)] = append(composeByKey[makeKey(composeEntry, keyEntry)], composeEntry)
 	}
+	terminalOut.PerfStart("Collect check conflicts: index compose")()
 
 	runningByKey := make(map[string][]IPEntry)
 	for _, dockerEntry := range dockerEntries {
-		if _, ok := scopeNetworks[dockerEntry.Network]; ok &&
-			dockerEntry.Running &&
-			!isListOnlyNetwork(dockerEntry.Network) {
+		if _, ok := scopeNetworks[dockerEntry.Network]; ok && dockerEntry.Running && !isListOnlyNetwork(dockerEntry.Network) {
 			runningByKey[makeKey(dockerEntry, keyEntry)] = append(runningByKey[makeKey(dockerEntry, keyEntry)], dockerEntry)
 		}
 	}
+	terminalOut.PerfStart("Collect check conflicts: index running")()
 
 	duplicateConflictKeys := make(map[string]struct{})
 	for key, entries := range composeByKey {
@@ -486,6 +499,7 @@ func collectCheckConflicts(
 			Details: []string{fmt.Sprintf("%s", strings.Join(names, ", "))},
 		})
 	}
+	terminalOut.PerfStart("Collect check conflicts: find duplicates")()
 
 	runningConflictKeys := make(map[string]struct{})
 	for _, composeEntry := range filteredCompose {
@@ -513,6 +527,7 @@ func collectCheckConflicts(
 			})
 		}
 	}
+	terminalOut.PerfStart("Collect check conflicts: find running conflicts")()
 
 	sort.Slice(conflicts, func(i, j int) bool {
 		if conflicts[i].Type != conflicts[j].Type {
@@ -727,10 +742,9 @@ func collectGroupOverlapErrors(ranges []namedGroupRange) []string {
 				break
 			}
 			if rangesOverlap(current.rng, candidate.rng) {
-				errorsList = append(errorsList,
-					fmt.Sprintf("overlap: %s (%s-%s) with %s (%s-%s)",
-						current.name, current.rng.Start, current.rng.End,
-						candidate.name, candidate.rng.Start, candidate.rng.End))
+				errorsList = append(errorsList, fmt.Sprintf("overlap: %s (%s-%s) with %s (%s-%s)",
+					current.name, current.rng.Start, current.rng.End,
+					candidate.name, candidate.rng.Start, candidate.rng.End))
 			}
 		}
 	}
@@ -763,7 +777,7 @@ func emitDiscoveryWarnings(stderr io.Writer, state *discoveryResult, quiet bool,
 	for _, warning := range state.Warnings {
 		lower := strings.ToLower(warning)
 		if !quiet || strings.Contains(lower, "docker unavailable") {
-			fmt.Fprintln(stderr, warningLine(stderr, warning))
+			fmt.Fprintln(stderr, terminalOut.WarningLine(stderr, warning))
 		}
 	}
 }
@@ -864,16 +878,9 @@ func isPrivateIPv4(addr netip.Addr) bool {
 		return false
 	}
 	octets := addr.As4()
-	switch {
-	case octets[0] == 10:
-		return true
-	case octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31:
-		return true
-	case octets[0] == 192 && octets[1] == 168:
-		return true
-	default:
-		return false
-	}
+	return (octets[0] == 10 ||
+		(octets[0] == 192 && octets[1] == 168) ||
+		(octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31))
 }
 
 type keyKind uint8

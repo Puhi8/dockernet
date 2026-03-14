@@ -3,24 +3,30 @@ package app
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
+
+	"github.com/Puhi8/dockernet/internal/app/terminal"
 )
 
 func discoverState(ctx context.Context, opts runtimeOptions) (*discoveryResult, error) {
+	defer terminalOut.PerfStart("Discover state")()
 	state := &discoveryResult{}
-
 	composeFiles, walkWarnings := discoverComposeFiles(opts.ComposeRoots, opts.IgnorePaths)
 	state.Warnings = append(state.Warnings, walkWarnings...)
 
 	parsedByFile := make(map[string]composeParseResult, len(composeFiles))
 	relevantComposeFiles := make([]string, 0, len(composeFiles))
 	volumePaths := make([]string, 0)
-	for _, composeFile := range composeFiles {
-		parsed, err := parseComposeFile(composeFile, opts.IncludeIPv6)
+	parsedResults, parseErrors := parseComposeFiles(composeFiles, opts.IncludeIPv6)
+	for idx, composeFile := range composeFiles {
+		parsed := parsedResults[idx]
+		err := parseErrors[idx]
 		if err != nil {
 			state.Warnings = append(state.Warnings, fmt.Sprintf("compose parse failed for %s: %v", composeFile, err))
 			continue
@@ -33,6 +39,7 @@ func discoverState(ctx context.Context, opts runtimeOptions) (*discoveryResult, 
 		relevantComposeFiles = append(relevantComposeFiles, composeFile)
 		volumePaths = append(volumePaths, parsed.VolumePaths...)
 	}
+	terminalOut.PerfStart("Discover state: parse compose files")()
 
 	filteredComposeFiles := filterComposeFilesByVolumePaths(relevantComposeFiles, volumePaths)
 	state.ComposeFiles = filteredComposeFiles
@@ -44,6 +51,7 @@ func discoverState(ctx context.Context, opts runtimeOptions) (*discoveryResult, 
 			networkSet[network] = struct{}{}
 		}
 	}
+	terminalOut.PerfStart("Discover state: collect configured networks")()
 
 	for _, composeFile := range filteredComposeFiles {
 		parsed := parsedByFile[composeFile]
@@ -56,6 +64,7 @@ func discoverState(ctx context.Context, opts runtimeOptions) (*discoveryResult, 
 			}
 		}
 	}
+	terminalOut.PerfStart("Discover state: merge compose results")()
 	sortEntries(state.ComposeEntries, SortIPEntries)
 	sortEntries(state.ComposePorts, SortPort)
 
@@ -69,16 +78,54 @@ func discoverState(ctx context.Context, opts runtimeOptions) (*discoveryResult, 
 			networkSet[network] = struct{}{}
 		}
 	}
+	terminalOut.PerfStart("Discover state: merge docker networks")()
 
 	for network := range networkSet {
 		state.Networks = append(state.Networks, network)
 	}
 	sort.Strings(state.Networks)
-
+	terminalOut.PerfStart("Discover state: finalize network list")()
 	return state, nil
 }
 
+func parseComposeFiles(composeFiles []string, includeIPv6 bool) ([]composeParseResult, []error) {
+	results := make([]composeParseResult, len(composeFiles))
+	errorsList := make([]error, len(composeFiles))
+	if len(composeFiles) == 0 {
+		return results, errorsList
+	}
+
+	workers := min(max(runtime.GOMAXPROCS(0), 1), len(composeFiles))
+	terminalOut.Logf("Workers:", workers)
+	if workers == 1 {
+		for idx, composeFile := range composeFiles {
+			results[idx], errorsList[idx] = parseComposeFile(composeFile, includeIPv6)
+		}
+		return results, errorsList
+	}
+
+	jobs := make(chan int, workers)
+	var waitGroup sync.WaitGroup
+	for range workers {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			for idx := range jobs {
+				results[idx], errorsList[idx] = parseComposeFile(composeFiles[idx], includeIPv6)
+			}
+		}()
+	}
+
+	for idx := range composeFiles {
+		jobs <- idx
+	}
+	close(jobs)
+	waitGroup.Wait()
+	return results, errorsList
+}
+
 func discoverDocker(ctx context.Context, includeIPv6 bool) dockerDiscovery {
+	defer terminalOut.PerfStart("Discover docker")()
 	result := dockerDiscovery{
 		Available: false,
 	}
@@ -107,6 +154,7 @@ func discoverDocker(ctx context.Context, includeIPv6 bool) dockerDiscovery {
 			result.Networks = append(result.Networks, name)
 		}
 	}
+	terminalOut.PerfStart("Discover docker: collect network names")()
 	result.Networks = dedupeStrings(result.Networks)
 
 	containers, err := cli.ContainerList(ctx, types.ContainerListOptions{All: true})
@@ -120,25 +168,21 @@ func discoverDocker(ctx context.Context, includeIPv6 bool) dockerDiscovery {
 		running := strings.EqualFold(strings.TrimSpace(containerInfo.State), "running")
 		project := strings.TrimSpace(containerInfo.Labels["com.docker.compose.project"])
 		service := strings.TrimSpace(containerInfo.Labels["com.docker.compose.service"])
-
 		if containerInfo.NetworkSettings != nil && len(containerInfo.NetworkSettings.Networks) > 0 {
 			networkNames := make([]string, 0, len(containerInfo.NetworkSettings.Networks))
 			for networkName := range containerInfo.NetworkSettings.Networks {
 				networkNames = append(networkNames, networkName)
 			}
 			sort.Strings(networkNames)
-
 			for _, networkName := range networkNames {
 				networkName = strings.TrimSpace(networkName)
 				if networkName == "" || networkName == "none" {
 					continue
 				}
-
 				endpoint := containerInfo.NetworkSettings.Networks[networkName]
 				if endpoint == nil {
 					continue
 				}
-
 				if networkName == "host" {
 					result.Entries = appendDockerIPEntry(result.Entries, "host", "host", 0, containerName, service, project, running)
 					continue
@@ -182,6 +226,7 @@ func discoverDocker(ctx context.Context, includeIPv6 bool) dockerDiscovery {
 			)
 		}
 	}
+	terminalOut.PerfStart("Discover docker: process containers")()
 
 	sortEntries(result.Entries, SortIPEntries)
 	sortEntries(result.Ports, SortPort)

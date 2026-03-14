@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Puhi8/dockernet/internal/app/terminal"
 )
 
 const (
@@ -114,12 +116,12 @@ type freeResultRow struct {
 func run(args []string, stdout, stderr io.Writer) (int, error) {
 	globals, err := parseGlobalFlags(args)
 	if err != nil {
-		writeHelpMenu(stdout, "main")
+		terminalOut.WriteHelpMenu(stdout, "main")
 		return exitCodeRuntime, err
 	}
 
 	if globals.Command == "help" {
-		runHelp(stdout, globals.CommandArgs)
+		terminalOut.RunHelp(stdout, globals.CommandArgs)
 		return exitCodeOK, nil
 	}
 
@@ -137,7 +139,7 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return exitCodeRuntime, err
 	}
-	setColorEnabled(opts.EnableColor)
+	terminalOut.SetColorEnabled(opts.EnableColor)
 
 	switch globals.Command {
 	case "ls":
@@ -151,7 +153,7 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 	case "sections":
 		return runSections(opts, globals.CommandArgs, stdout, stderr)
 	default:
-		writeHelpMenu(stdout, "main")
+		terminalOut.WriteHelpMenu(stdout, "main")
 		return exitCodeRuntime, fmt.Errorf("unknown command %q", globals.Command)
 	}
 }
@@ -165,12 +167,12 @@ func parseGlobalFlags(args []string) (parsedGlobalFlags, error) {
 	flagSet.SetOutput(io.Discard)
 
 	var globals parsedGlobalFlags
-	addFlag(flagSet, &globals.ConfigPath, "c", "config", "", "config path")
-	addFlag(flagSet, &globals.RootsCSV, "r", "root", "", "compose roots")
-	addFlag(flagSet, &globals.IPv6, "6", "ipv6", false, "include ipv6")
-	addFlag(flagSet, &globals.JSON, "j", "json", false, "json output")
-	addFlag(flagSet, &globals.Quiet, "q", "quiet", false, "quiet mode")
-	addFlag(flagSet, &globals.Help, "h", "help", false, "show help")
+	terminalOut.AddFlag(flagSet, &globals.ConfigPath, "c", "config", "", "config path")
+	terminalOut.AddFlag(flagSet, &globals.RootsCSV, "r", "root", "", "compose roots")
+	terminalOut.AddFlag(flagSet, &globals.IPv6, "6", "ipv6", false, "include ipv6")
+	terminalOut.AddFlag(flagSet, &globals.JSON, "j", "json", false, "json output")
+	terminalOut.AddFlag(flagSet, &globals.Quiet, "q", "quiet", false, "quiet mode")
+	terminalOut.AddFlag(flagSet, &globals.Help, "h", "help", false, "show help")
 
 	if err := flagSet.Parse(args[1:]); err != nil {
 		return parsedGlobalFlags{}, err
