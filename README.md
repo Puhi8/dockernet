@@ -41,7 +41,8 @@ go build -o dockernet .
 # Create config
 cp dockernet.conf.example ~/.dockernet.conf
 ```
-development tags: `perftrace`, `debug
+development tags: `perftrace`, `debug`
+
 for static/minimized build:
 
 ```bash
