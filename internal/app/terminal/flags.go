@@ -1,8 +1,8 @@
-package app
+package terminalOut
 
 import "flag"
 
-func addFlag[T any](flagSet *flag.FlagSet, value *T, short, long string, defaultValue T, usage string) {
+func AddFlag[T any](flagSet *flag.FlagSet, value *T, short, long string, defaultValue T, usage string) {
 	switch v := any(value).(type) {
 	case *string:
 		if short != "" {

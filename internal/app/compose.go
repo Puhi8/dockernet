@@ -1,10 +1,12 @@
 package app
 
 import (
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -57,6 +59,7 @@ func parseComposeFile(path string, includeIPv6 bool) (composeParseResult, error)
 	for serviceName, serviceNode := range yamlMapPairs(servicesNode) {
 		containerName := strings.TrimSpace(yamlScalar(yamlMapLookup(serviceNode, "container_name")))
 		result.VolumePaths = append(result.VolumePaths, extractVolumeHostPaths(serviceNode, composeDir)...)
+		result.Ports = append(result.Ports, parseServicePortEntries(serviceNode, serviceName, containerName, project, path, &result.Warnings)...)
 
 		for _, networkRef := range parseServiceNetworkRefs(serviceNode) {
 			resolvedNetwork := networkRef.Name
@@ -98,7 +101,10 @@ func parseComposeFile(path string, includeIPv6 bool) (composeParseResult, error)
 
 	result.Networks = dedupeStrings(result.Networks)
 	result.VolumePaths = dedupeStrings(result.VolumePaths)
-	sortEntries(result.Entries, "ip_entries")
+	sortEntries(result.Entries, SortIPEntries)
+	result.Ports = dedupePortEntries(result.Ports)
+	sortEntries(result.Ports, SortPort)
+	result.Warnings = dedupeStrings(result.Warnings)
 
 	return result, nil
 }
@@ -114,6 +120,31 @@ func appendComposeIPEntry(entries []IPEntry, network, ip string, ipVersion int, 
 		Network:       network,
 		IP:            ip,
 		IPVersion:     ipVersion,
+		Service:       service,
+		ContainerName: containerName,
+		Project:       project,
+		ComposeFile:   composeFile,
+		Running:       false,
+		Source:        "compose",
+	})
+}
+
+func appendComposePortEntry(
+	entries []IPEntry,
+	protocol string,
+	containerPort int,
+	hostIP string,
+	hostPort int,
+	published bool,
+	origin, service, containerName, project, composeFile string,
+) []IPEntry {
+	return append(entries, IPEntry{
+		Protocol:      protocol,
+		ContainerPort: containerPort,
+		HostIP:        hostIP,
+		HostPort:      hostPort,
+		Published:     published,
+		Origin:        origin,
 		Service:       service,
 		ContainerName: containerName,
 		Project:       project,
@@ -155,6 +186,364 @@ func parseServiceNetworkRefs(serviceNode *yaml.Node) []serviceNetworkRef {
 	return refs
 }
 
+func parseServicePortEntries(
+	serviceNode *yaml.Node,
+	serviceName, containerName, project, composeFile string,
+	warnings *[]string,
+) []IPEntry {
+	entries := make([]IPEntry, 0)
+	appendWarning := func(format string, args ...any) {
+		*warnings = append(*warnings, fmt.Sprintf("compose port parse warning in %s (%s): %s", composeFile, serviceName, fmt.Sprintf(format, args...)))
+	}
+
+	if exposeNode := yamlMapLookup(serviceNode, "expose"); exposeNode != nil {
+		entries = append(entries, parseComposeExposeEntries(exposeNode, serviceName, containerName, project, composeFile, appendWarning)...)
+	}
+	if portsNode := yamlMapLookup(serviceNode, "ports"); portsNode != nil {
+		entries = append(entries, parseComposePublishedEntries(portsNode, serviceName, containerName, project, composeFile, appendWarning)...)
+	}
+	return entries
+}
+
+func parseComposeExposeEntries(
+	node *yaml.Node,
+	serviceName, containerName, project, composeFile string,
+	appendWarning func(string, ...any),
+) []IPEntry {
+	entries := make([]IPEntry, 0)
+	parseScalar := func(raw string) {
+		base, protocol, err := splitPortProtocol(raw)
+		if err != nil {
+			appendWarning("%v", err)
+			return
+		}
+
+		start, end, ok := parseComposePortRange(base, false)
+		if !ok {
+			appendWarning("invalid expose value %q", raw)
+			return
+		}
+		for port := start; port <= end; port++ {
+			entries = appendComposePortEntry(entries, protocol, port, "", 0, false, "exposed", serviceName, containerName, project, composeFile)
+		}
+	}
+
+	switch node.Kind {
+	case yaml.ScalarNode:
+		parseScalar(yamlScalar(node))
+	case yaml.SequenceNode:
+		for _, item := range node.Content {
+			if item.Kind != yaml.ScalarNode {
+				appendWarning("unsupported expose node kind %d", item.Kind)
+				continue
+			}
+			parseScalar(yamlScalar(item))
+		}
+	default:
+		appendWarning("unsupported expose node kind %d", node.Kind)
+	}
+	return entries
+}
+
+func parseComposePublishedEntries(
+	node *yaml.Node,
+	serviceName, containerName, project, composeFile string,
+	appendWarning func(string, ...any),
+) []IPEntry {
+	entries := make([]IPEntry, 0)
+	parseScalar := func(raw string) {
+		scalarEntries, warning := parseComposePublishedScalarEntry(raw, serviceName, containerName, project, composeFile)
+		if warning != "" {
+			appendWarning("%s", warning)
+		}
+		entries = append(entries, scalarEntries...)
+	}
+	parseMapping := func(item *yaml.Node) {
+		mappingEntries, warning := parseComposePublishedMappingEntry(item, serviceName, containerName, project, composeFile)
+		if warning != "" {
+			appendWarning("%s", warning)
+		}
+		entries = append(entries, mappingEntries...)
+	}
+
+	switch node.Kind {
+	case yaml.ScalarNode:
+		parseScalar(yamlScalar(node))
+	case yaml.SequenceNode:
+		for _, item := range node.Content {
+			switch item.Kind {
+			case yaml.ScalarNode:
+				parseScalar(yamlScalar(item))
+			case yaml.MappingNode:
+				parseMapping(item)
+			default:
+				appendWarning("unsupported ports node kind %d", item.Kind)
+			}
+		}
+	default:
+		appendWarning("unsupported ports node kind %d", node.Kind)
+	}
+	return entries
+}
+
+func parseComposePublishedScalarEntry(
+	raw, serviceName, containerName, project, composeFile string,
+) ([]IPEntry, string) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, "empty ports value"
+	}
+
+	base, protocol, err := splitPortProtocol(value)
+	if err != nil {
+		return nil, err.Error()
+	}
+
+	hostIP, hostPortRaw, containerPortRaw, err := splitComposeShortPortSpec(base)
+	if err != nil {
+		return nil, err.Error()
+	}
+
+	containerStart, containerEnd, ok := parseComposePortRange(containerPortRaw, false)
+	if !ok {
+		return nil, fmt.Sprintf("invalid container port in %q", raw)
+	}
+
+	hasHostPort := strings.TrimSpace(hostPortRaw) != ""
+	hostStart, hostEnd := 0, 0
+	if hasHostPort {
+		var parsed bool
+		hostStart, hostEnd, parsed = parseComposePortRange(hostPortRaw, true)
+		if !parsed {
+			return nil, fmt.Sprintf("invalid host port in %q", raw)
+		}
+	}
+
+	entries := make([]IPEntry, 0)
+	entries, warning := appendComposePublishedRangeEntries(
+		entries,
+		protocol,
+		containerStart,
+		containerEnd,
+		hostIP,
+		hostStart,
+		hostEnd,
+		hasHostPort,
+		serviceName,
+		containerName,
+		project,
+		composeFile,
+	)
+	return entries, warning
+}
+
+func parseComposePublishedMappingEntry(
+	item *yaml.Node,
+	serviceName, containerName, project, composeFile string,
+) ([]IPEntry, string) {
+	if item == nil || item.Kind != yaml.MappingNode {
+		return nil, "invalid ports mapping"
+	}
+
+	targetRaw := yamlScalar(yamlMapLookup(item, "target"))
+	if targetRaw == "" {
+		return nil, "ports mapping missing target"
+	}
+	containerStart, containerEnd, ok := parseComposePortRange(targetRaw, false)
+	if !ok {
+		return nil, fmt.Sprintf("invalid target %q", targetRaw)
+	}
+
+	protocol := normalizePortProtocol(yamlScalar(yamlMapLookup(item, "protocol")))
+	hostIP := normalizePortHostIP(yamlScalar(yamlMapLookup(item, "host_ip")))
+	publishedRaw := yamlScalar(yamlMapLookup(item, "published"))
+	hasHostPort := strings.TrimSpace(publishedRaw) != ""
+	hostStart, hostEnd := 0, 0
+	if hasHostPort {
+		var parsed bool
+		hostStart, hostEnd, parsed = parseComposePortRange(publishedRaw, true)
+		if !parsed {
+			return nil, fmt.Sprintf("invalid published value %q", publishedRaw)
+		}
+	}
+
+	entries := make([]IPEntry, 0)
+	entries, warning := appendComposePublishedRangeEntries(
+		entries,
+		protocol,
+		containerStart,
+		containerEnd,
+		hostIP,
+		hostStart,
+		hostEnd,
+		hasHostPort,
+		serviceName,
+		containerName,
+		project,
+		composeFile,
+	)
+	return entries, warning
+}
+
+func appendComposePublishedRangeEntries(
+	entries []IPEntry,
+	protocol string,
+	containerStart, containerEnd int,
+	hostIP string,
+	hostStart, hostEnd int,
+	hasHostPort bool,
+	serviceName, containerName, project, composeFile string,
+) ([]IPEntry, string) {
+	containerCount := containerEnd - containerStart + 1
+	hostCount := 0
+	if hasHostPort {
+		hostCount = hostEnd - hostStart + 1
+		if containerCount != hostCount {
+			return entries, fmt.Sprintf(
+				"container range %d-%d and host range %d-%d have different lengths",
+				containerStart,
+				containerEnd,
+				hostStart,
+				hostEnd,
+			)
+		}
+	}
+
+	for offset := 0; offset < containerCount; offset++ {
+		hostPort := 0
+		if hasHostPort {
+			hostPort = hostStart + offset
+		}
+		entries = appendComposePortEntry(
+			entries,
+			protocol,
+			containerStart+offset,
+			hostIP,
+			hostPort,
+			true,
+			"published",
+			serviceName,
+			containerName,
+			project,
+			composeFile,
+		)
+	}
+	return entries, ""
+}
+
+func splitPortProtocol(raw string) (string, string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", "", fmt.Errorf("empty port value")
+	}
+
+	protocol := "tcp"
+	if slash := strings.LastIndex(value, "/"); slash >= 0 {
+		base := strings.TrimSpace(value[:slash])
+		candidate := strings.TrimSpace(value[slash+1:])
+		if base == "" || candidate == "" {
+			return "", "", fmt.Errorf("invalid protocol segment in %q", raw)
+		}
+		value = base
+		protocol = normalizePortProtocol(candidate)
+	}
+	return value, protocol, nil
+}
+
+func splitComposeShortPortSpec(value string) (hostIP, hostPort, containerPort string, err error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", "", "", fmt.Errorf("empty ports value")
+	}
+
+	lastColon := lastColonOutsideBrackets(trimmed)
+	if lastColon < 0 {
+		return "", "", trimmed, nil
+	}
+
+	containerPort = strings.TrimSpace(trimmed[lastColon+1:])
+	left := strings.TrimSpace(trimmed[:lastColon])
+	if containerPort == "" || left == "" {
+		return "", "", "", fmt.Errorf("invalid ports value %q", value)
+	}
+
+	secondLastColon := lastColonOutsideBrackets(left)
+	if secondLastColon < 0 {
+		return "", strings.TrimSpace(left), containerPort, nil
+	}
+
+	rawHostIP := strings.TrimSpace(left[:secondLastColon])
+	hostPort = strings.TrimSpace(left[secondLastColon+1:])
+	if rawHostIP == "" || hostPort == "" {
+		return "", "", "", fmt.Errorf("invalid host binding in %q", value)
+	}
+	return normalizePortHostIP(rawHostIP), hostPort, containerPort, nil
+}
+
+func lastColonOutsideBrackets(value string) int {
+	depth := 0
+	for idx := len(value) - 1; idx >= 0; idx-- {
+		switch value[idx] {
+		case ']':
+			depth++
+		case '[':
+			if depth > 0 {
+				depth--
+			}
+		case ':':
+			if depth == 0 {
+				return idx
+			}
+		}
+	}
+	return -1
+}
+
+func normalizePortHostIP(raw string) string {
+	hostIP := strings.Trim(strings.TrimSpace(raw), `"'`)
+	if hostIP == "*" {
+		return ""
+	}
+	if strings.HasPrefix(hostIP, "[") && strings.HasSuffix(hostIP, "]") {
+		hostIP = strings.TrimSpace(hostIP[1 : len(hostIP)-1])
+	}
+	return hostIP
+}
+
+func parseComposePortRange(raw string, allowZero bool) (int, int, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, 0, false
+	}
+	if strings.Contains(value, ",") {
+		return 0, 0, false
+	}
+
+	startRaw, endRaw, hasRange := strings.Cut(value, "-")
+	start, ok := parseComposePortNumber(startRaw, allowZero)
+	if !ok {
+		return 0, 0, false
+	}
+	if !hasRange {
+		return start, start, true
+	}
+	end, ok := parseComposePortNumber(endRaw, allowZero)
+	if !ok || end < start {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+func parseComposePortNumber(raw string, allowZero bool) (int, bool) {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil ||
+		(value < 0 || value > 65535) ||
+		(!allowZero && value == 0) {
+		return 0, false
+	}
+	return value, true
+}
+
 func parseComposeNetworkAliases(document *yaml.Node) map[string]string {
 	aliases := make(map[string]string)
 	networksNode := yamlMapLookup(document, "networks")
@@ -180,7 +569,6 @@ func resolveComposeProjectName(document *yaml.Node, composeDir string, dotenv ma
 	if configured := strings.TrimSpace(yamlScalar(yamlMapLookup(document, "name"))); configured != "" {
 		return configured
 	}
-
 	if fromEnv := strings.TrimSpace(os.Getenv("COMPOSE_PROJECT_NAME")); fromEnv != "" {
 		return fromEnv
 	}
@@ -202,8 +590,8 @@ func loadDotEnvFile(composeDir string) (map[string]string, error) {
 		return nil, err
 	}
 
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(string(data), "\n")
+	for line := range lines {
 		raw := strings.TrimSpace(line)
 		if raw == "" || strings.HasPrefix(raw, "#") {
 			continue
@@ -217,9 +605,8 @@ func loadDotEnvFile(composeDir string) (map[string]string, error) {
 			continue
 		}
 		key = strings.TrimSpace(key)
-		value = strings.Trim(strings.TrimSpace(value), `"'`)
 		if key != "" {
-			result[key] = value
+			result[key] = strings.Trim(strings.TrimSpace(value), `"'`)
 		}
 	}
 	return result, nil
@@ -375,18 +762,15 @@ func resolveBindSourcePath(source, composeDir string) string {
 	if source == "" {
 		return ""
 	}
-
 	if strings.HasPrefix(source, "~") {
 		home, err := os.UserHomeDir()
 		if err == nil {
 			source = filepath.Join(home, strings.TrimPrefix(source, "~"))
 		}
 	}
-
 	if filepath.IsAbs(source) {
 		return filepath.Clean(source)
 	}
-
 	if strings.HasPrefix(source, ".") || strings.Contains(source, string(os.PathSeparator)) {
 		return filepath.Clean(filepath.Join(composeDir, source))
 	}
@@ -394,8 +778,8 @@ func resolveBindSourcePath(source, composeDir string) string {
 }
 
 func hasTopLevelServicesKey(data []byte) bool {
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(string(data), "\n")
+	for line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" ||
 			strings.HasPrefix(trimmed, "#") ||
@@ -407,7 +791,6 @@ func hasTopLevelServicesKey(data []byte) bool {
 		if !ok {
 			continue
 		}
-
 		if strings.TrimSpace(key) == "services" {
 			return true
 		}
@@ -420,13 +803,8 @@ func normalizeValidIP(raw string, version int) string {
 	if raw == "" {
 		return ""
 	}
-
 	addr, err := netip.ParseAddr(raw)
-	if err != nil {
-		return ""
-	}
-
-	if (version == 4 && !addr.Is4()) || (version == 6 && !addr.Is6()) {
+	if err != nil || (version == 4 && !addr.Is4()) || (version == 6 && !addr.Is6()) {
 		return ""
 	}
 	return addr.String()

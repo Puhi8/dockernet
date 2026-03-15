@@ -9,44 +9,71 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Puhi8/dockernet/internal/app/terminal"
 )
 
-func buildPSRows(composeEntries, dockerEntries []IPEntry) []IPEntry {
-	rows := make([]IPEntry, 0, len(composeEntries)+len(dockerEntries))
+func buildPSRows(composeEntries, dockerEntries []IPEntry, key keyKind) []IPEntry {
+	defer terminalOut.PerfStart("Build PS rows")()
 
-	dockerIndex := buildDockerPSMatchIndex(dockerEntries)
+	rows := make([]IPEntry, 0, len(composeEntries)+len(dockerEntries))
+	dockerIndex := buildPSMatchIndex(
+		dockerEntries,
+		func(entry IPEntry) string { return makeKey(entry, key) },
+		func(entry IPEntry) string { return entry.ContainerName },
+	)
 	matchedDocker := make([]bool, len(dockerEntries))
 
+	var sortType SortType
+	var dedupe func([]IPEntry) []IPEntry
+	var preliminaryFactory, fallbackFactory func(IPEntry) func(int) bool
+	matchesCompose := func(entry IPEntry) func(int) bool {
+		return func(idx int) bool {
+			return ownerMatchesCompose(entry.ContainerName, entry.Project, entry.Service, dockerEntries[idx].ContainerName)
+		}
+	}
+	portMatchesConflict := func(entry IPEntry) func(int) bool {
+		return func(idx int) bool { return dockerPortConfigMatchesCompose(entry, dockerEntries[idx]) }
+	}
+
+	switch key {
+	case keyPortBase:
+		preliminaryFactory = portMatchesConflict
+		fallbackFactory = func(entry IPEntry) func(int) bool {
+			return func(idx int) bool { return portMatchesConflict(entry)(idx) && matchesCompose(entry)(idx) }
+		}
+		sortType = SortPort
+		dedupe = dedupePortEntries
+	case keyEntry:
+		preliminaryFactory = nil
+		fallbackFactory = matchesCompose
+		sortType = SortIPEntries
+		dedupe = dedupePSRows
+	default:
+		panic("Unsupported key when building ps rows!")
+	}
+	matchComposeDone := terminalOut.PerfStart("Build PS rows: match compose entries")
 	for _, composeEntry := range composeEntries {
-		key := entryKey(composeEntry)
-		matched := -1
-
-		composeContainerName := strings.TrimSpace(composeEntry.ContainerName)
-		if composeContainerName != "" {
-			matched = firstUnmatchedDockerIndex(dockerIndex.byKeyByContainerName[key][composeContainerName], matchedDocker)
-		} else {
-			for _, prefix := range composeManagedPrefixes(composeEntry) {
-				matched = firstUnmatchedDockerIndex(dockerIndex.byKeyByPrefix[key][prefix], matchedDocker)
-				if matched != -1 {
-					break
-				}
-			}
+		var preliminaryPredicate func(int) bool
+		if preliminaryFactory != nil {
+			preliminaryPredicate = preliminaryFactory(composeEntry)
 		}
-
-		if matched == -1 {
-			for _, dockerIdx := range dockerIndex.byKey[key] {
-				if !matchedDocker[dockerIdx] && dockerMatchesCompose(composeEntry, dockerEntries[dockerIdx]) {
-					matched = dockerIdx
-					break
-				}
-			}
-		}
+		fallbackPredicate := fallbackFactory(composeEntry)
+		matched := findPSMatchedDockerIndex(
+			dockerIndex,
+			matchedDocker,
+			makeKey(composeEntry, key),
+			composeEntry.ContainerName,
+			composeEntry.Project,
+			composeEntry.Service,
+			preliminaryPredicate,
+			fallbackPredicate,
+		)
 
 		if matched == -1 {
 			rows = append(rows, composeEntry)
 			continue
 		}
-
 		dockerEntry := dockerEntries[matched]
 		matchedDocker[matched] = true
 		row := composeEntry
@@ -55,38 +82,49 @@ func buildPSRows(composeEntries, dockerEntries []IPEntry) []IPEntry {
 		if strings.TrimSpace(row.ContainerName) == "" {
 			row.ContainerName = dockerEntry.ContainerName
 		}
+		if key == keyPortBase {
+			if strings.TrimSpace(row.HostIP) == "" {
+				row.HostIP = dockerEntry.HostIP
+			}
+			if row.HostPort == 0 {
+				row.HostPort = dockerEntry.HostPort
+			}
+			if row.Origin == "" {
+				row.Origin = dockerEntry.Origin
+			} else if row.Origin != dockerEntry.Origin &&
+				(row.Origin == "published" || dockerEntry.Origin == "published") {
+				row.Origin = "published"
+			}
+		}
 		rows = append(rows, row)
 	}
-
-	for idx, dockerEntry := range dockerEntries {
-		if !matchedDocker[idx] {
-			rows = append(rows, dockerEntry)
-		}
-	}
-
-	rows = dedupePSRows(rows)
-	sortEntries(rows, "ip_entries")
+	matchComposeDone()
+	finalizeDone := terminalOut.PerfStart("Build PS rows: finalize")
+	rows = appendUnmatchedEntries(rows, dockerEntries, matchedDocker)
+	rows = dedupe(rows)
+	sortEntries(rows, sortType)
+	finalizeDone()
 	return rows
 }
 
-type dockerPSMatchIndex struct {
+type psMatchIndex struct {
 	byKey                map[string][]int
 	byKeyByContainerName map[string]map[string][]int
 	byKeyByPrefix        map[string]map[string][]int
 }
 
-func buildDockerPSMatchIndex(dockerEntries []IPEntry) dockerPSMatchIndex {
-	index := dockerPSMatchIndex{
+func buildPSMatchIndex[T any](entries []T, keyFn func(T) string, containerNameFn func(T) string) psMatchIndex {
+	index := psMatchIndex{
 		byKey:                make(map[string][]int),
 		byKeyByContainerName: make(map[string]map[string][]int),
 		byKeyByPrefix:        make(map[string]map[string][]int),
 	}
 
-	for idx, dockerEntry := range dockerEntries {
-		key := entryKey(dockerEntry)
+	for idx, entry := range entries {
+		key := keyFn(entry)
 		index.byKey[key] = append(index.byKey[key], idx)
 
-		containerName := strings.TrimSpace(dockerEntry.ContainerName)
+		containerName := strings.TrimSpace(containerNameFn(entry))
 		if containerName == "" {
 			continue
 		}
@@ -129,22 +167,59 @@ func dockerContainerManagedPrefixes(containerName string) []string {
 	return prefixes
 }
 
-func composeManagedPrefixes(entry IPEntry) []string {
-	project := strings.TrimSpace(entry.Project)
-	service := strings.TrimSpace(entry.Service)
+func composeManagedPrefixes(project, service string) []string {
+	project = strings.TrimSpace(project)
+	service = strings.TrimSpace(service)
 	if project == "" || service == "" {
 		return nil
 	}
 	return []string{project + "-" + service + "-", project + "_" + service + "_"}
 }
 
-func firstUnmatchedDockerIndex(candidates []int, matched []bool) int {
+func firstUnmatchedIndex(candidates []int, matched []bool, predicate func(int) bool) int {
 	for _, idx := range candidates {
-		if !matched[idx] {
+		if !matched[idx] && (predicate == nil || predicate(idx)) {
 			return idx
 		}
 	}
 	return -1
+}
+
+func findPSMatchedDockerIndex(
+	index psMatchIndex,
+	matched []bool,
+	key, composeContainerName, composeProject, composeService string,
+	preliminaryPredicate func(int) bool,
+	fallbackPredicate func(int) bool,
+) int {
+	match := -1
+	composeContainerName = strings.TrimSpace(composeContainerName)
+	if composeContainerName != "" {
+		match = firstUnmatchedIndex(index.byKeyByContainerName[key][composeContainerName], matched, preliminaryPredicate)
+	} else {
+		for _, prefix := range composeManagedPrefixes(composeProject, composeService) {
+			match = firstUnmatchedIndex(index.byKeyByPrefix[key][prefix], matched, preliminaryPredicate)
+			if match != -1 {
+				break
+			}
+		}
+	}
+	if match != -1 {
+		return match
+	}
+	if fallbackPredicate == nil {
+		fallbackPredicate = preliminaryPredicate
+	}
+	return firstUnmatchedIndex(index.byKey[key], matched, fallbackPredicate)
+}
+
+func appendUnmatchedEntries[T any](rows, entries []T, matched []bool) []T {
+	for idx, entry := range entries {
+		if !matched[idx] {
+			rows = append(rows, entry)
+		}
+	}
+	return rows
 }
 
 func dedupePSRows(rows []IPEntry) []IPEntry {
@@ -152,11 +227,10 @@ func dedupePSRows(rows []IPEntry) []IPEntry {
 		return nil
 	}
 
-	// If we already have a merged "both" row for the same compose identity/network/ip, skip compose-only duplicates.
 	mergedKeys := make(map[string]struct{})
 	for _, row := range rows {
 		if row.Source == "both" {
-			mergedKeys[psComposeKey(row)] = struct{}{}
+			mergedKeys[makeKey(row, keyPSCompose)] = struct{}{}
 		}
 	}
 
@@ -164,22 +238,18 @@ func dedupePSRows(rows []IPEntry) []IPEntry {
 	deduped := make([]IPEntry, 0, len(rows))
 	for _, row := range rows {
 		if row.Source == "compose" {
-			if _, exists := mergedKeys[psComposeKey(row)]; exists {
+			if _, exists := mergedKeys[makeKey(row, keyPSCompose)]; exists {
 				continue
 			}
 		}
 
-		key := psDisplayKey(row)
+		key := makeKey(row, keyPSDisplay)
 		if _, exists := seen[key]; !exists {
 			seen[key] = struct{}{}
 			deduped = append(deduped, row)
 		}
 	}
 	return deduped
-}
-
-func psComposeKey(entry IPEntry) string {
-	return fmt.Sprintf("%s|%d|%s|%s", entry.Network, entry.IPVersion, entry.IP, psComposeIdentity(entry))
 }
 
 func psComposeIdentity(entry IPEntry) string {
@@ -202,43 +272,162 @@ func psComposeIdentity(entry IPEntry) string {
 	return "-"
 }
 
-func psDisplayKey(entry IPEntry) string {
-	name := strings.TrimSpace(entry.ContainerName)
-	if name == "" {
-		name = strings.TrimSpace(entry.Service)
+func enrichPSRowsWithPorts(rows []IPEntry, composePorts, dockerPorts []IPEntry, includeProtocol, includeSummaries bool) []IPEntry {
+	defer terminalOut.PerfStart("Enrich PS rows with ports")()
+
+	if len(rows) == 0 {
+		return rows
 	}
-	return fmt.Sprintf("%s|%d|%s|%s|%t|%s|%s|%s|%s",
-		entry.Network,
-		entry.IPVersion,
-		entry.IP,
-		name,
-		entry.Running,
-		entry.Source,
-		strings.TrimSpace(entry.Service),
-		strings.TrimSpace(entry.Project),
-		strings.TrimSpace(entry.ComposeFile),
-	)
+
+	mergedPorts := buildPSRows(composePorts, dockerPorts, keyPortBase)
+	if len(mergedPorts) == 0 {
+		return rows
+	}
+
+	enriched := make([]IPEntry, len(rows))
+	copy(enriched, rows)
+	attachSummariesDone := terminalOut.PerfStart("Enrich PS rows with ports: attach summaries")
+	for idx, row := range enriched {
+		summaries := collectPortSummariesForPSRow(row, mergedPorts, includeProtocol)
+		if len(summaries) > 0 {
+			enriched[idx].HasPorts = true
+			if includeSummaries {
+				enriched[idx].Ports = summaries
+			}
+		}
+	}
+	attachSummariesDone()
+	return enriched
 }
 
-func psEntryName(entry IPEntry) string {
-	name := strings.TrimSpace(entry.ContainerName)
-	if name == "" {
-		name = strings.TrimSpace(entry.Service)
+func collectPortSummariesForPSRow(row IPEntry, ports []IPEntry, includeProtocol bool) []string {
+	if len(ports) == 0 {
+		return nil
 	}
-	if name == "" {
-		return "-"
+
+	seen := make(map[string]struct{})
+	summaries := make([]string, 0)
+	for _, port := range ports {
+		if !psRowMatchesPort(row, port) {
+			continue
+		}
+		summary := psPortSummary(port, includeProtocol)
+		if _, exists := seen[summary]; exists {
+			continue
+		}
+		seen[summary] = struct{}{}
+		summaries = append(summaries, summary)
 	}
-	return name
+	sort.Strings(summaries)
+	return summaries
+}
+
+func psRowMatchesPort(row IPEntry, port IPEntry) bool {
+	rowContainer := getEntryName(row)
+	portContainer := getEntryName(port)
+	if rowContainer != "" && portContainer != "" {
+		return rowContainer == portContainer
+	}
+	if rowContainer != "" {
+		return ownerMatchesCompose(port.ContainerName, port.Project, port.Service, rowContainer)
+	}
+
+	rowProject := strings.TrimSpace(row.Project)
+	rowService := strings.TrimSpace(row.Service)
+	if rowProject != "" && rowService != "" {
+		sameComposeServiceIdentity := strings.TrimSpace(rowProject) != "" &&
+			strings.TrimSpace(rowService) != "" &&
+			strings.TrimSpace(rowProject) == strings.TrimSpace(port.Project) &&
+			strings.TrimSpace(rowService) == strings.TrimSpace(port.Service)
+		if sameComposeServiceIdentity {
+			return true
+		}
+		if portContainer != "" {
+			return ownerMatchesCompose("", rowProject, rowService, portContainer)
+		}
+	}
+	return false
+}
+
+func psPortSummary(entry IPEntry, includeProtocol bool) string {
+	target := strconv.Itoa(entry.ContainerPort)
+	if includeProtocol {
+		target = fmt.Sprintf("%s/%s", target, normalizePortProtocol(entry.Protocol))
+	}
+	if !entry.Published {
+		return target
+	}
+
+	hostPort := "random"
+	if entry.HostPort > 0 {
+		hostPort = strconv.Itoa(entry.HostPort)
+	}
+	return hostPort + "->" + target
+}
+
+func dedupePortEntries(entries []IPEntry) []IPEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	bestByKey := make(map[string]IPEntry, len(entries))
+	for _, entry := range entries {
+		key := makeKey(entry, keyPortDisplay)
+		current, exists := bestByKey[key]
+		if !exists {
+			bestByKey[key] = entry
+			continue
+		}
+
+		entryScore := portSourceScore(entry.Source)
+		currentScore := portSourceScore(current.Source)
+		if entryScore > currentScore || (entryScore == currentScore && entry.Running && !current.Running) {
+			bestByKey[key] = entry
+		}
+	}
+
+	deduped := make([]IPEntry, 0, len(bestByKey))
+	for _, entry := range bestByKey {
+		deduped = append(deduped, entry)
+	}
+	return deduped
+}
+
+var portSourceScoreMap = map[string]int{"compose": 1, "docker": 2, "both": 3}
+
+func portSourceScore(source string) int {
+	score, ok := portSourceScoreMap[source]
+	if ok {
+		return score
+	}
+	return 0
+}
+
+func dockerPortConfigMatchesCompose(composeEntry, dockerEntry IPEntry) bool {
+	if normalizePortProtocol(composeEntry.Protocol) != normalizePortProtocol(dockerEntry.Protocol) ||
+		composeEntry.ContainerPort != dockerEntry.ContainerPort ||
+		composeEntry.Published != dockerEntry.Published ||
+		(composeEntry.HostPort > 0 && composeEntry.HostPort != dockerEntry.HostPort) {
+		return false
+	}
+	if !composeEntry.Published {
+		return true
+	}
+	composeHostIP := strings.TrimSpace(composeEntry.HostIP)
+	if composeHostIP != "" && composeHostIP != strings.TrimSpace(dockerEntry.HostIP) {
+		return false
+	}
+	return true
 }
 
 func collectCheckConflicts(
-	composeEntries,
-	dockerEntries []IPEntry,
+	composeEntries, dockerEntries []IPEntry,
 	scopeNetworks map[string]struct{},
 	groupName string,
 	groupRange *IPRange,
 	groups map[string]IPRange,
 ) []checkConflict {
+	defer terminalOut.PerfStart("Collect check conflicts")()
 	conflicts := make([]checkConflict, 0)
 
 	filteredCompose := make([]IPEntry, 0, len(composeEntries))
@@ -248,6 +437,7 @@ func collectCheckConflicts(
 			filteredCompose = append(filteredCompose, composeEntry)
 		}
 	}
+	terminalOut.PerfStart("Collect check conflicts: filter compose")()
 
 	if groupRange != nil {
 		inRangeCompose := make([]IPEntry, 0, len(filteredCompose))
@@ -270,11 +460,7 @@ func collectCheckConflicts(
 		inAnyGroupCompose := make([]IPEntry, 0, len(filteredCompose))
 		for _, composeEntry := range filteredCompose {
 			ipAddr, err := netip.ParseAddr(composeEntry.IP)
-			if err != nil {
-				conflicts = append(conflicts, outOfGroupConflict(composeEntry, "unassigned"))
-				continue
-			}
-			if findMatchingGroupName(ipAddr, groups, nil) == "" {
+			if err != nil || findMatchingGroupName(ipAddr, groups, nil) == "" {
 				conflicts = append(conflicts, outOfGroupConflict(composeEntry, "unassigned"))
 				continue
 			}
@@ -282,20 +468,21 @@ func collectCheckConflicts(
 		}
 		filteredCompose = inAnyGroupCompose
 	}
+	terminalOut.PerfStart("Collect check conflicts: apply group filter")()
 
 	composeByKey := make(map[string][]IPEntry)
 	for _, composeEntry := range filteredCompose {
-		composeByKey[entryKey(composeEntry)] = append(composeByKey[entryKey(composeEntry)], composeEntry)
+		composeByKey[makeKey(composeEntry, keyEntry)] = append(composeByKey[makeKey(composeEntry, keyEntry)], composeEntry)
 	}
+	terminalOut.PerfStart("Collect check conflicts: index compose")()
 
 	runningByKey := make(map[string][]IPEntry)
 	for _, dockerEntry := range dockerEntries {
-		if _, ok := scopeNetworks[dockerEntry.Network]; ok &&
-			dockerEntry.Running &&
-			!isListOnlyNetwork(dockerEntry.Network) {
-			runningByKey[entryKey(dockerEntry)] = append(runningByKey[entryKey(dockerEntry)], dockerEntry)
+		if _, ok := scopeNetworks[dockerEntry.Network]; ok && dockerEntry.Running && !isListOnlyNetwork(dockerEntry.Network) {
+			runningByKey[makeKey(dockerEntry, keyEntry)] = append(runningByKey[makeKey(dockerEntry, keyEntry)], dockerEntry)
 		}
 	}
+	terminalOut.PerfStart("Collect check conflicts: index running")()
 
 	duplicateConflictKeys := make(map[string]struct{})
 	for key, entries := range composeByKey {
@@ -303,7 +490,7 @@ func collectCheckConflicts(
 			continue
 		}
 		duplicateConflictKeys[key] = struct{}{}
-		sortEntries(entries, "ip_entries")
+		sortEntries(entries, SortIPEntries)
 		names := conflictNamesForKey(key, composeByKey, runningByKey)
 		conflicts = append(conflicts, checkConflict{
 			Type:    "duplicate_compose_ip",
@@ -312,12 +499,13 @@ func collectCheckConflicts(
 			Details: []string{fmt.Sprintf("%s", strings.Join(names, ", "))},
 		})
 	}
+	terminalOut.PerfStart("Collect check conflicts: find duplicates")()
 
 	runningConflictKeys := make(map[string]struct{})
 	for _, composeEntry := range filteredCompose {
-		key := entryKey(composeEntry)
+		key := makeKey(composeEntry, keyEntry)
 		for _, dockerEntry := range runningByKey[key] {
-			if !dockerMatchesCompose(composeEntry, dockerEntry) {
+			if !ownerMatchesCompose(composeEntry.ContainerName, composeEntry.Project, composeEntry.Service, dockerEntry.ContainerName) {
 				runningConflictKeys[key] = struct{}{}
 				break
 			}
@@ -329,7 +517,7 @@ func collectCheckConflicts(
 		}
 		entries := composeByKey[key]
 		if len(entries) != 0 {
-			sortEntries(entries, "ip_entries")
+			sortEntries(entries, SortIPEntries)
 			names := conflictNamesForKey(key, composeByKey, runningByKey)
 			conflicts = append(conflicts, checkConflict{
 				Type:    "running_ip_taken",
@@ -339,6 +527,7 @@ func collectCheckConflicts(
 			})
 		}
 	}
+	terminalOut.PerfStart("Collect check conflicts: find running conflicts")()
 
 	sort.Slice(conflicts, func(i, j int) bool {
 		if conflicts[i].Type != conflicts[j].Type {
@@ -367,16 +556,13 @@ func outOfGroupConflict(entry IPEntry, groupName string) checkConflict {
 func conflictNamesForKey(key string, composeByKey map[string][]IPEntry, runningByKey map[string][]IPEntry) []string {
 	seen := make(map[string]struct{})
 	for _, composeEntry := range composeByKey[key] {
-		name := strings.TrimSpace(composeEntry.ContainerName)
-		if name == "" {
-			name = strings.TrimSpace(composeEntry.Service)
-		}
+		name := getEntryName(composeEntry)
 		if name != "" {
 			seen[name] = struct{}{}
 		}
 	}
 	for _, dockerEntry := range runningByKey[key] {
-		name := strings.TrimSpace(dockerEntry.ContainerName)
+		name := getEntryName(dockerEntry)
 		if name != "" {
 			seen[name] = struct{}{}
 		}
@@ -390,23 +576,18 @@ func conflictNamesForKey(key string, composeByKey map[string][]IPEntry, runningB
 	return names
 }
 
-func dockerMatchesCompose(composeEntry, dockerEntry IPEntry) bool {
-	dockerContainerName := strings.TrimSpace(dockerEntry.ContainerName)
+func ownerMatchesCompose(composeContainerName, composeProject, composeService, dockerContainerName string) bool {
+	dockerContainerName = strings.TrimSpace(dockerContainerName)
 	if dockerContainerName == "" {
 		return false
 	}
 
-	if composeContainerName := strings.TrimSpace(composeEntry.ContainerName); composeContainerName != "" {
+	composeContainerName = strings.TrimSpace(composeContainerName)
+	if composeContainerName != "" {
 		return dockerContainerName == composeContainerName
 	}
 
-	project := strings.TrimSpace(composeEntry.Project)
-	service := strings.TrimSpace(composeEntry.Service)
-	if project == "" || service == "" {
-		return false
-	}
-
-	for _, prefix := range []string{project + "-" + service + "-", project + "_" + service + "_"} {
+	for _, prefix := range composeManagedPrefixes(composeProject, composeService) {
 		if strings.HasPrefix(dockerContainerName, prefix) {
 			suffix := strings.TrimPrefix(dockerContainerName, prefix)
 			if _, err := strconv.Atoi(suffix); err == nil {
@@ -555,16 +736,15 @@ func collectGroupOverlapErrors(ranges []namedGroupRange) []string {
 	})
 
 	errorsList := make([]string, 0)
-	for i := 0; i < len(ranges); i++ {
-		current := ranges[i]
-		for j := i + 1; j < len(ranges); j++ {
-			candidate := ranges[j]
+	for i, current := range ranges {
+		for _, candidate := range ranges[i+1:] {
 			if candidate.rng.Start.Compare(current.rng.End) > 0 {
 				break
 			}
 			if rangesOverlap(current.rng, candidate.rng) {
 				errorsList = append(errorsList, fmt.Sprintf("overlap: %s (%s-%s) with %s (%s-%s)",
-					current.name, current.rng.Start, current.rng.End, candidate.name, candidate.rng.Start, candidate.rng.End))
+					current.name, current.rng.Start, current.rng.End,
+					candidate.name, candidate.rng.Start, candidate.rng.End))
 			}
 		}
 	}
@@ -590,10 +770,6 @@ func compareIPStrings(a, b string) int {
 	}
 }
 
-func entryKey(entry IPEntry) string {
-	return fmt.Sprintf("%s|%d|%s", entry.Network, entry.IPVersion, entry.IP)
-}
-
 func emitDiscoveryWarnings(stderr io.Writer, state *discoveryResult, quiet bool, jsonOutput bool) {
 	if jsonOutput {
 		return
@@ -601,7 +777,7 @@ func emitDiscoveryWarnings(stderr io.Writer, state *discoveryResult, quiet bool,
 	for _, warning := range state.Warnings {
 		lower := strings.ToLower(warning)
 		if !quiet || strings.Contains(lower, "docker unavailable") {
-			fmt.Fprintln(stderr, warningLine(stderr, warning))
+			fmt.Fprintln(stderr, terminalOut.WarningLine(stderr, warning))
 		}
 	}
 }
@@ -634,7 +810,6 @@ func resolveHostNetworkIPs(rows []IPEntry) []IPEntry {
 	if hostIPv4 == "" {
 		return rows
 	}
-
 	resolved := make([]IPEntry, len(rows))
 	copy(resolved, rows)
 	for idx := range resolved {
@@ -660,7 +835,6 @@ func detectLocalIPv4() string {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || isContainerBridgeInterface(iface.Name) {
 			continue
 		}
-
 		addrs, err := iface.Addrs()
 		if err != nil {
 			continue
@@ -675,7 +849,6 @@ func detectLocalIPv4() string {
 			if !candidate.Is4() || !candidate.IsGlobalUnicast() {
 				continue
 			}
-
 			if isPrivateIPv4(candidate) {
 				return candidate.String()
 			}
@@ -684,7 +857,6 @@ func detectLocalIPv4() string {
 			}
 		}
 	}
-
 	return fallback
 }
 
@@ -706,14 +878,57 @@ func isPrivateIPv4(addr netip.Addr) bool {
 		return false
 	}
 	octets := addr.As4()
-	switch {
-	case octets[0] == 10:
-		return true
-	case octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31:
-		return true
-	case octets[0] == 192 && octets[1] == 168:
-		return true
+	return (octets[0] == 10 ||
+		(octets[0] == 192 && octets[1] == 168) ||
+		(octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31))
+}
+
+type keyKind uint8
+
+const (
+	keyEntry keyKind = iota
+	keyPSCompose
+	keyPSDisplay
+	keyPortBase
+	keyPortDisplay
+)
+
+func makeKey(entry IPEntry, kind keyKind) string {
+	basic := func() string {
+		return fmt.Sprintf("%s|%d|%s", entry.Network, entry.IPVersion, entry.IP)
+	}
+	portBasic := func() string {
+		return fmt.Sprintf("%s|%d|%t", normalizePortProtocol(entry.Protocol), entry.ContainerPort, entry.Published)
+	}
+	display := func() string {
+		return fmt.Sprintf("%s|%s|%s", strings.TrimSpace(entry.Service), strings.TrimSpace(entry.Project), strings.TrimSpace(entry.ComposeFile))
+	}
+	switch kind {
+	case keyEntry:
+		return basic()
+	case keyPSCompose:
+		return fmt.Sprintf("%s|%s", basic(), psComposeIdentity(entry))
+	case keyPSDisplay:
+		return fmt.Sprintf("%s|%s|%t|%s|%s",
+			basic(),
+			getEntryName(entry),
+			entry.Running,
+			entry.Source,
+			display(),
+		)
+	case keyPortBase:
+		return portBasic()
+	case keyPortDisplay:
+		return fmt.Sprintf(
+			"%s|%s|%s|%s|%d|%s",
+			getEntryName(entry),
+			display(),
+			portBasic(),
+			strings.TrimSpace(entry.HostIP),
+			entry.HostPort,
+			strings.TrimSpace(entry.Origin),
+		)
 	default:
-		return false
+		panic(fmt.Sprintf("unsupported key kind: %d", kind))
 	}
 }

@@ -12,11 +12,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Puhi8/dockernet/internal/app/terminal"
 )
 
 func runLS(ctx context.Context, opts runtimeOptions, args []string, stdout, stderr io.Writer) (int, error) {
-	if hasHelpArg(args) {
-		runHelp(stdout, []string{"ls"})
+	defer terminalOut.PerfStart("LS command")()
+	if terminalOut.HasHelpArg(args) {
+		terminalOut.RunHelp(stdout, []string{"ls"})
 		return exitCodeOK, nil
 	}
 
@@ -37,6 +40,7 @@ func runLS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 			runningCount++
 		}
 	}
+	terminalOut.PerfStart("LS: count running entries")()
 
 	if opts.JSON {
 		payload := struct {
@@ -66,21 +70,21 @@ func runLS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 	} else {
 		networkLabels := make([]string, 0, len(state.Networks))
 		for _, network := range state.Networks {
-			networkLabels = append(networkLabels, colorize(stdout, ansiCyan, network))
+			networkLabels = append(networkLabels, terminalOut.Colorize(stdout, terminalOut.ANSICyan, network))
 		}
 		printTitle := func(text string, value int) {
 			fmt.Fprintf(stdout, "%s %s\n",
-				colorize(stdout, ansiBlue, text),
-				colorize(stdout, ansiGreen, strconv.Itoa(value)),
+				terminalOut.Colorize(stdout, terminalOut.ANSIBlue, text),
+				terminalOut.Colorize(stdout, terminalOut.ANSIGreen, strconv.Itoa(value)),
 			)
 		}
 		fmt.Fprintf(stdout, "%s %s\n",
-			colorize(stdout, ansiBlue, "networks:"),
+			terminalOut.Colorize(stdout, terminalOut.ANSIBlue, "networks:"),
 			strings.Join(networkLabels, ", "),
 		)
 		printTitle("compose_files:", len(state.ComposeFiles))
 		for _, file := range state.ComposeFiles {
-			fmt.Fprintf(stdout, "  %s\n", colorize(stdout, ansiGray, file))
+			fmt.Fprintf(stdout, "  %s\n", terminalOut.Colorize(stdout, terminalOut.ANSIGray, file))
 		}
 		printTitle("static_ips:", len(state.ComposeEntries))
 		printTitle("running_ips:", runningCount)
@@ -93,8 +97,9 @@ func runLS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 }
 
 func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stderr io.Writer) (int, error) {
-	if hasHelpArg(args) {
-		runHelp(stdout, []string{"ps"})
+	defer terminalOut.PerfStart("PS command")()
+	if terminalOut.HasHelpArg(args) {
+		terminalOut.RunHelp(stdout, []string{"ps"})
 		return exitCodeOK, nil
 	}
 
@@ -109,16 +114,23 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 	var runningOnly bool
 	var composeOnly bool
 	var allInOne bool
-	addFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
-	addFlag(flagSet, &ipPrefix, "i", "ip-prefix", "", "ip prefix filter")
+	var showPorts bool
+	var showPortProtocols bool
+	terminalOut.AddFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
+	terminalOut.AddFlag(flagSet, &ipPrefix, "i", "ip-prefix", "", "ip prefix filter")
 	addGroupSelectionFlags(flagSet, &groupName, &groupNumber, "group filter")
-	addFlag(flagSet, &sortBy, "s", "sort", "ip", "sort order: ip|name")
-	addFlag(flagSet, &runningOnly, "r", "running", false, "only running")
-	addFlag(flagSet, &composeOnly, "c", "compose-only", false, "only compose entries")
-	addFlag(flagSet, &allInOne, "a", "all-in-one", false, "print one combined table")
+	terminalOut.AddFlag(flagSet, &sortBy, "s", "sort", "ip", "sort order: ip|name")
+	terminalOut.AddFlag(flagSet, &runningOnly, "r", "running", false, "only running")
+	terminalOut.AddFlag(flagSet, &composeOnly, "c", "compose-only", false, "only compose entries")
+	terminalOut.AddFlag(flagSet, &allInOne, "a", "all-in-one", false, "print one combined table")
+	terminalOut.AddFlag(flagSet, &showPorts, "p", "ports", false, "include exposed/published ports column")
+	terminalOut.AddFlag(flagSet, &showPortProtocols, "pp", "ports-protocol", false, "include protocol in ports column")
 
 	if err := parseNoPositionalArgs(flagSet, args, "ps"); err != nil {
 		return exitCodeRuntime, err
+	}
+	if showPortProtocols {
+		showPorts = true
 	}
 	sortBy = strings.ToLower(strings.TrimSpace(sortBy))
 	if sortBy == "" {
@@ -132,7 +144,7 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 		return exitCodeRuntime, err
 	}
 	if !opts.JSON && selectedGroup.Explicit {
-		fmt.Fprintln(stdout, colorize(stdout, ansiMagenta, selectedGroup.Name))
+		fmt.Fprintln(stdout, terminalOut.Colorize(stdout, terminalOut.ANSIMagenta, selectedGroup.Name))
 	}
 	groupRange := selectedGroupRange(selectedGroup, opts.Groups)
 
@@ -141,7 +153,7 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 		return exitCodeRuntime, err
 	}
 
-	rows := buildPSRows(state.ComposeEntries, state.DockerEntries)
+	rows := buildPSRows(state.ComposeEntries, state.DockerEntries, keyEntry)
 	rows = resolveHostNetworkIPs(rows)
 	trimmedNetworkFilter := strings.TrimSpace(networkFilter)
 	trimmedIPPrefix := strings.TrimSpace(ipPrefix)
@@ -161,7 +173,11 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 		}
 		filteredRows = append(filteredRows, row)
 	}
-	sortEntries(filteredRows, sortBy)
+	terminalOut.PerfStart("PS: filter rows")()
+	sortEntries(filteredRows, sortByStringMap[sortBy])
+	terminalOut.PerfStart("PS: sort rows")()
+	filteredRows = enrichPSRowsWithPorts(filteredRows, state.ComposePorts, state.DockerPorts, showPortProtocols, showPorts)
+	terminalOut.PerfStart("PS: attach ports")()
 
 	if opts.JSON {
 		selectedGroupNumber := selectedGroupNumberPointer(selectedGroup)
@@ -185,7 +201,7 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 		if err := writeJSON(stdout, payload); err != nil {
 			return exitCodeRuntime, err
 		}
-	} else if err := printPSRowsByGroup(stdout, filteredRows, opts.Groups, opts.GroupOrder, allInOne); err != nil {
+	} else if err := printPSRowsByGroup(stdout, filteredRows, opts.Groups, opts.GroupOrder, allInOne, showPorts); err != nil {
 		return exitCodeRuntime, err
 	}
 
@@ -196,8 +212,9 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 }
 
 func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, stderr io.Writer) (int, error) {
-	if hasHelpArg(args) {
-		runHelp(stdout, []string{"check"})
+	defer terminalOut.PerfStart("Check command")()
+	if terminalOut.HasHelpArg(args) {
+		terminalOut.RunHelp(stdout, []string{"check"})
 		return exitCodeOK, nil
 	}
 
@@ -207,7 +224,7 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 	var networkFilter string
 	var groupName string
 	groupNumber := -1
-	addFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
+	terminalOut.AddFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
 	addGroupSelectionFlags(flagSet, &groupName, &groupNumber, "group filter")
 
 	if err := parseNoPositionalArgs(flagSet, args, "check"); err != nil {
@@ -259,14 +276,14 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 		}
 	} else {
 		if len(conflicts) == 0 {
-			fmt.Fprintln(stdout, successLine(stdout, "no conflicts"))
+			fmt.Fprintln(stdout, terminalOut.SuccessLine(stdout, "no conflicts"))
 		} else {
 			rows := make([][]string, 0, len(conflicts))
 			for _, conflict := range conflicts {
 				rows = append(rows, []string{
-					conflictTypeLabel(stdout, conflict.Type),
+					terminalOut.ColorizeLabel(stdout, conflict.Type, "conflict"),
 					conflict.Network,
-					colorize(stdout, ansiRed, conflict.IP),
+					terminalOut.Colorize(stdout, terminalOut.ANSIRed, conflict.IP),
 					strings.Join(conflict.Details, "; "),
 				})
 			}
@@ -285,10 +302,10 @@ func runCheck(ctx context.Context, opts runtimeOptions, args []string, stdout, s
 	return exitCodeOK, nil
 }
 
-func printPSRowsByGroup(w io.Writer, entries []IPEntry, groups map[string]IPRange, configOrder []string, allInOne bool) error {
+func printPSRowsByGroup(w io.Writer, entries []IPEntry, groups map[string]IPRange, configOrder []string, allInOne, showPorts bool) error {
 	orderedGroups := orderedGroupNames(groups, configOrder)
 	if allInOne || len(entries) == 0 || len(orderedGroups) == 0 {
-		return printPSRowsTable(w, entries)
+		return printPSRowsTable(w, entries, showPorts)
 	}
 
 	entriesByGroup := make(map[string][]IPEntry, len(orderedGroups))
@@ -308,7 +325,7 @@ func printPSRowsByGroup(w io.Writer, entries []IPEntry, groups map[string]IPRang
 	}
 
 	rows := make([][]string, 0, len(entries)+len(orderedGroups)+4)
-	rows = append(rows, psTableHeaderRow(w))
+	rows = append(rows, psTableHeaderRow(w, showPorts))
 
 	printed := false
 	for _, groupName := range orderedGroups {
@@ -317,63 +334,91 @@ func printPSRowsByGroup(w io.Writer, entries []IPEntry, groups map[string]IPRang
 			continue
 		}
 		if printed {
-			rows = append(rows, []string{"", "", "", "", ""})
+			rows = append(rows, psSpacerRow(showPorts))
 		}
-		rows = append(rows, psGroupLabelRow(w, groupName))
+		rows = append(rows, psGroupLabelRow(w, groupName, showPorts))
 		for _, row := range groupRows {
-			rows = append(rows, psTableEntryRow(w, row))
+			rows = append(rows, psTableEntryRow(w, row, showPorts))
 		}
 		printed = true
 	}
 
 	if len(unassignedEntries) > 0 {
 		if printed {
-			rows = append(rows, []string{"", "", "", "", ""})
+			rows = append(rows, psSpacerRow(showPorts))
 		}
-		rows = append(rows, psGroupLabelRow(w, "unassigned"))
+		rows = append(rows, psGroupLabelRow(w, "unassigned", showPorts))
 		for _, row := range unassignedEntries {
-			rows = append(rows, psTableEntryRow(w, row))
+			rows = append(rows, psTableEntryRow(w, row, showPorts))
 		}
 		printed = true
 	}
 
 	if !printed {
-		return printPSRowsTable(w, entries)
+		return printPSRowsTable(w, entries, showPorts)
 	}
 	return printAlignedRows(w, rows)
 }
 
-func printPSRowsTable(w io.Writer, entries []IPEntry) error {
+func printPSRowsTable(w io.Writer, entries []IPEntry, showPorts bool) error {
 	rows := make([][]string, 0, len(entries)+1)
-	rows = append(rows, psTableHeaderRow(w))
-
+	rows = append(rows, psTableHeaderRow(w, showPorts))
 	for _, row := range entries {
-		rows = append(rows, psTableEntryRow(w, row))
+		rows = append(rows, psTableEntryRow(w, row, showPorts))
 	}
 	return printAlignedRows(w, rows)
 }
 
-func psTableHeaderRow(w io.Writer) []string {
+func psTableHeaderRow(w io.Writer, showPorts bool) []string {
+	if showPorts {
+		return makeHeaders(w, "CONTAINER", "NETWORK", "IP", "PORTS", "RUNNING", "SOURCE")
+	}
 	return makeHeaders(w, "CONTAINER", "NETWORK", "IP", "RUNNING", "SOURCE")
 }
 
-func psTableEntryRow(w io.Writer, row IPEntry) []string {
-	return []string{
-		colorize(w, ansiBlue, psEntryName(row)),
-		row.Network,
-		psIPLabel(w, row.Network, row.IP),
-		runningLabel(w, row.Running),
-		sourceLabel(w, row.Source),
+func psEntryName(entry IPEntry) string {
+	name := getEntryName(entry)
+	if name == "" {
+		return "-"
 	}
+	return name
 }
 
-func psGroupLabelRow(w io.Writer, groupName string) []string {
-	return []string{colorize(w, ansiMagenta, groupName), "", "", "", ""}
+func psTableEntryRow(w io.Writer, row IPEntry, showPorts bool) []string {
+	values := []string{
+		terminalOut.Colorize(w, terminalOut.ANSIBlue, psEntryName(row)),
+		row.Network,
+		terminalOut.PSIPLabel(w, row.Network, row.IP),
+	}
+	if showPorts {
+		values = append(values, terminalOut.PSPortsLabel(w, row.Ports))
+	}
+	values = append(values,
+		terminalOut.RunningLabel(w, row.Running),
+		terminalOut.ColorizeLabel(w, row.Source, "source"),
+	)
+	return values
+}
+
+func psGroupLabelRow(w io.Writer, groupName string, showPorts bool) []string {
+	if showPorts {
+		return []string{terminalOut.Colorize(w, terminalOut.ANSIMagenta, groupName), "", "", "", "", ""}
+	}
+	return []string{terminalOut.Colorize(w, terminalOut.ANSIMagenta, groupName), "", "", "", ""}
+}
+
+func psSpacerRow(showPorts bool) []string {
+	if showPorts {
+		return []string{"", "", "", "", "", ""}
+	}
+	return []string{"", "", "", "", ""}
 }
 
 func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout, stderr io.Writer) (int, error) {
-	if hasHelpArg(args) {
-		runHelp(stdout, []string{"nextFree"})
+	defer terminalOut.PerfStart("NextFree command")()
+
+	if terminalOut.HasHelpArg(args) {
+		terminalOut.RunHelp(stdout, []string{"nextFree"})
 		return exitCodeOK, nil
 	}
 
@@ -385,21 +430,19 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 	groupNumber := -1
 	count := 2
 	addGroupSelectionFlags(flagSet, &groupName, &groupNumber, "group name")
-	addFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
+	terminalOut.AddFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
 
 	if err := flagSet.Parse(args); err != nil {
 		return exitCodeRuntime, err
 	}
 	positionals := flagSet.Args()
-	switch len(positionals) {
-	case 0:
-	case 1:
+	if len(positionals) == 1 {
 		parsedCount, err := strconv.Atoi(strings.TrimSpace(positionals[0]))
 		if err != nil {
 			return exitCodeRuntime, fmt.Errorf("invalid nextFree count %q", positionals[0])
 		}
 		count = parsedCount
-	default:
+	} else if len(positionals) > 1 {
 		return exitCodeRuntime, fmt.Errorf("unexpected args for nextFree: %v", positionals)
 	}
 	if count <= 0 {
@@ -492,7 +535,7 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 			return exitCodeRuntime, err
 		}
 		if notEnough {
-			fmt.Fprintln(stderr, warningLine(stderr, notEnoughWarning))
+			fmt.Fprintln(stderr, terminalOut.WarningLine(stderr, notEnoughWarning))
 		}
 	}
 
@@ -503,8 +546,8 @@ func runNextFree(ctx context.Context, opts runtimeOptions, args []string, stdout
 }
 
 func runSections(opts runtimeOptions, args []string, stdout, stderr io.Writer) (int, error) {
-	if hasHelpArg(args) {
-		runHelp(stdout, []string{"sections"})
+	if terminalOut.HasHelpArg(args) {
+		terminalOut.RunHelp(stdout, []string{"sections"})
 		return exitCodeOK, nil
 	}
 
@@ -514,9 +557,9 @@ func runSections(opts runtimeOptions, args []string, stdout, stderr io.Writer) (
 	var edit bool
 	var validate bool
 	var showPath bool
-	addFlag(flagSet, &edit, "e", "edit", false, "open config in $EDITOR")
-	addFlag(flagSet, &validate, "v", "validate", false, "validate group overlaps")
-	addFlag(flagSet, &showPath, "p", "path", false, "print config file path")
+	terminalOut.AddFlag(flagSet, &edit, "e", "edit", false, "open config in $EDITOR")
+	terminalOut.AddFlag(flagSet, &validate, "v", "validate", false, "validate group overlaps")
+	terminalOut.AddFlag(flagSet, &showPath, "p", "path", false, "print config file path")
 	if err := parseNoPositionalArgs(flagSet, args, "sections"); err != nil {
 		return exitCodeRuntime, err
 	}
@@ -600,16 +643,16 @@ func runSections(opts runtimeOptions, args []string, stdout, stderr io.Writer) (
 		rows = append(rows, makeHeaders(stdout, "SECTION", "START", "END"))
 		for _, row := range groupRows {
 			rows = append(rows, []string{
-				colorize(stdout, ansiBlue, row.Name),
-				colorize(stdout, ansiYellow, row.Start),
-				colorize(stdout, ansiGreen, row.End),
+				terminalOut.Colorize(stdout, terminalOut.ANSIBlue, row.Name),
+				terminalOut.Colorize(stdout, terminalOut.ANSIYellow, row.Start),
+				terminalOut.Colorize(stdout, terminalOut.ANSIGreen, row.End),
 			})
 		}
 		if err := printAlignedRows(stdout, rows); err != nil {
 			return exitCodeRuntime, err
 		}
 		for _, validationError := range validationErrors {
-			fmt.Fprintln(stderr, warningLine(stderr, validationError))
+			fmt.Fprintln(stderr, terminalOut.WarningLine(stderr, validationError))
 		}
 	}
 
@@ -634,7 +677,7 @@ func printAlignedRows(w io.Writer, rows [][]string) error {
 	widths := make([]int, maxCols)
 	for _, row := range rows {
 		for idx, cell := range row {
-			if cellWidth := visibleWidth(cell); cellWidth > widths[idx] {
+			if cellWidth := terminalOut.VisibleWidth(cell); cellWidth > widths[idx] {
 				widths[idx] = cellWidth
 			}
 		}
@@ -651,7 +694,7 @@ func printAlignedRows(w io.Writer, rows [][]string) error {
 			if idx < len(row) {
 				cell = row[idx]
 			}
-			if _, err := io.WriteString(w, padRightVisible(cell, widths[idx])); err != nil {
+			if _, err := io.WriteString(w, terminalOut.PadRightVisible(cell, widths[idx])); err != nil {
 				return err
 			}
 		}

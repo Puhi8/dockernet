@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Puhi8/dockernet/internal/app/terminal"
 )
 
 const (
@@ -51,21 +53,31 @@ type runtimeOptions struct {
 }
 
 type IPEntry struct {
-	Network       string `json:"network"`
-	IP            string `json:"ip"`
-	IPVersion     int    `json:"ip_version"`
-	Service       string `json:"service,omitempty"`
-	ContainerName string `json:"container_name,omitempty"`
-	Project       string `json:"project,omitempty"`
-	ComposeFile   string `json:"compose_file,omitempty"`
-	Running       bool   `json:"running"`
-	Source        string `json:"source"`
+	Network       string   `json:"network,omitempty"`
+	IP            string   `json:"ip,omitempty"`
+	IPVersion     int      `json:"ip_version,omitempty"`
+	Protocol      string   `json:"protocol,omitempty"`
+	ContainerPort int      `json:"container_port,omitempty"`
+	HostIP        string   `json:"host_ip,omitempty"`
+	HostPort      int      `json:"host_port,omitempty"`
+	Published     bool     `json:"published,omitempty"`
+	Origin        string   `json:"origin,omitempty"`
+	Service       string   `json:"service,omitempty"`
+	ContainerName string   `json:"container_name,omitempty"`
+	Project       string   `json:"project,omitempty"`
+	ComposeFile   string   `json:"compose_file,omitempty"`
+	Ports         []string `json:"ports,omitempty"`
+	HasPorts      bool     `json:"has_ports,omitempty"`
+	Running       bool     `json:"running"`
+	Source        string   `json:"source"`
 }
 
 type discoveryResult struct {
 	ComposeFiles   []string  `json:"compose_files"`
 	ComposeEntries []IPEntry `json:"compose_entries"`
+	ComposePorts   []IPEntry `json:"compose_ports"`
 	DockerEntries  []IPEntry `json:"docker_entries"`
+	DockerPorts    []IPEntry `json:"docker_ports"`
 	Networks       []string  `json:"networks"`
 	Warnings       []string  `json:"warnings"`
 	Degraded       bool      `json:"compose_only"`
@@ -73,13 +85,16 @@ type discoveryResult struct {
 
 type composeParseResult struct {
 	Entries     []IPEntry
+	Ports       []IPEntry
 	Networks    []string
 	VolumePaths []string
+	Warnings    []string
 	IsCompose   bool
 }
 
 type dockerDiscovery struct {
 	Entries   []IPEntry
+	Ports     []IPEntry
 	Networks  []string
 	Warnings  []string
 	Available bool
@@ -101,12 +116,12 @@ type freeResultRow struct {
 func run(args []string, stdout, stderr io.Writer) (int, error) {
 	globals, err := parseGlobalFlags(args)
 	if err != nil {
-		writeHelpMenu(stdout, "main")
+		terminalOut.WriteHelpMenu(stdout, "main")
 		return exitCodeRuntime, err
 	}
 
 	if globals.Command == "help" {
-		runHelp(stdout, globals.CommandArgs)
+		terminalOut.RunHelp(stdout, globals.CommandArgs)
 		return exitCodeOK, nil
 	}
 
@@ -124,7 +139,7 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return exitCodeRuntime, err
 	}
-	setColorEnabled(opts.EnableColor)
+	terminalOut.SetColorEnabled(opts.EnableColor)
 
 	switch globals.Command {
 	case "ls":
@@ -138,7 +153,7 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 	case "sections":
 		return runSections(opts, globals.CommandArgs, stdout, stderr)
 	default:
-		writeHelpMenu(stdout, "main")
+		terminalOut.WriteHelpMenu(stdout, "main")
 		return exitCodeRuntime, fmt.Errorf("unknown command %q", globals.Command)
 	}
 }
@@ -152,12 +167,12 @@ func parseGlobalFlags(args []string) (parsedGlobalFlags, error) {
 	flagSet.SetOutput(io.Discard)
 
 	var globals parsedGlobalFlags
-	addFlag(flagSet, &globals.ConfigPath, "c", "config", "", "config path")
-	addFlag(flagSet, &globals.RootsCSV, "r", "root", "", "compose roots")
-	addFlag(flagSet, &globals.IPv6, "6", "ipv6", false, "include ipv6")
-	addFlag(flagSet, &globals.JSON, "j", "json", false, "json output")
-	addFlag(flagSet, &globals.Quiet, "q", "quiet", false, "quiet mode")
-	addFlag(flagSet, &globals.Help, "h", "help", false, "show help")
+	terminalOut.AddFlag(flagSet, &globals.ConfigPath, "c", "config", "", "config path")
+	terminalOut.AddFlag(flagSet, &globals.RootsCSV, "r", "root", "", "compose roots")
+	terminalOut.AddFlag(flagSet, &globals.IPv6, "6", "ipv6", false, "include ipv6")
+	terminalOut.AddFlag(flagSet, &globals.JSON, "j", "json", false, "json output")
+	terminalOut.AddFlag(flagSet, &globals.Quiet, "q", "quiet", false, "quiet mode")
+	terminalOut.AddFlag(flagSet, &globals.Help, "h", "help", false, "show help")
 
 	if err := flagSet.Parse(args[1:]); err != nil {
 		return parsedGlobalFlags{}, err
