@@ -21,6 +21,7 @@ var defaultIgnorePaths = []string{
 func discoverComposeFiles(roots []string, ignorePaths []string) ([]string, []string) {
 	defer terminalOut.PerfStart("Discover compose files")()
 	ignoreRules := normalizeIgnorePaths(append(append([]string(nil), defaultIgnorePaths...), ignorePaths...))
+	terminalOut.Logf("discoverComposeFiles: roots=%v ignoreRules=%v", roots, ignoreRules)
 
 	warnings := make([]string, 0)
 	files := make(map[string]struct{})
@@ -37,14 +38,16 @@ func discoverComposeFiles(roots []string, ignorePaths []string) ([]string, []str
 			warnings = append(warnings, fmt.Sprintf("resolve root %q: %v", root, err))
 			return
 		}
-		realRoot, err := filepath.EvalSymlinks(absRoot) // support symlink 
+		realRoot, err := filepath.EvalSymlinks(absRoot) // support symlink
 		if err == nil {
 			absRoot = realRoot
 		}
 		if _, seen := visitedDirs[absRoot]; seen {
+			terminalOut.Logf("discoverComposeFiles: skipping already-visited root %q", absRoot)
 			return
 		}
 		visitedDirs[absRoot] = struct{}{}
+		terminalOut.Logf("discoverComposeFiles: walking root %q", absRoot)
 
 		walkErr := filepath.WalkDir(absRoot, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
@@ -60,6 +63,7 @@ func discoverComposeFiles(roots []string, ignorePaths []string) ([]string, []str
 			}
 			cleanPath := filepath.Clean(path)
 			if shouldIgnorePath(cleanPath, ignoreRules) {
+				terminalOut.Logf("discoverComposeFiles: ignoring path %q", cleanPath)
 				if isDir {
 					return filepath.SkipDir
 				}
@@ -88,6 +92,7 @@ func discoverComposeFiles(roots []string, ignorePaths []string) ([]string, []str
 					return nil
 				}
 				if isComposeFile(path) || isComposeFile(resolved) {
+					terminalOut.Logf("discoverComposeFiles: found symlink compose file %q -> %q", path, resolved)
 					files[normalizeDiscoveredFilePath(resolved)] = struct{}{}
 				}
 				return nil
@@ -96,6 +101,7 @@ func discoverComposeFiles(roots []string, ignorePaths []string) ([]string, []str
 			if isDir {
 				return nil
 			}
+			terminalOut.Logf("discoverComposeFiles: found candidate %q", path)
 			files[normalizeDiscoveredFilePath(path)] = struct{}{}
 			return nil
 		})

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -23,25 +24,41 @@ func discoverState(ctx context.Context, opts runtimeOptions) (*discoveryResult, 
 	parsedByFile := make(map[string]composeParseResult, len(composeFiles))
 	relevantComposeFiles := make([]string, 0, len(composeFiles))
 	volumePaths := make([]string, 0)
+	terminalOut.Logf("discoverState: %d candidate file(s) found by walker", len(composeFiles))
 	parsedResults, parseErrors := parseComposeFiles(composeFiles, opts.IncludeIPv6)
 	for idx, composeFile := range composeFiles {
 		parsed := parsedResults[idx]
 		err := parseErrors[idx]
 		if err != nil {
+			terminalOut.Logf("discoverState: parse error for %q: %v", composeFile, err)
 			state.Warnings = append(state.Warnings, fmt.Sprintf("compose parse failed for %s: %v", composeFile, err))
 			continue
 		}
 		state.Warnings = append(state.Warnings, parsed.Warnings...)
 		if !parsed.IsCompose {
+			terminalOut.Logf("discoverState: %q has no top-level services key, skipping", composeFile)
 			continue
 		}
+		terminalOut.Logf("discoverState: %q accepted as compose file", composeFile)
 		parsedByFile[composeFile] = parsed
 		relevantComposeFiles = append(relevantComposeFiles, composeFile)
-		volumePaths = append(volumePaths, parsed.VolumePaths...)
+		composeDir := filepath.Dir(composeFile)
+		composeDirWithSep := composeDir + string(filepath.Separator)
+		for _, vp := range parsed.VolumePaths {
+			// Skip volume paths that are ancestors of (or equal to) the compose
+			// file's own directory — they would cause the compose file to filter itself.
+			if strings.HasPrefix(composeDirWithSep, vp+string(filepath.Separator)) {
+				terminalOut.Logf("discoverState: skipping self-referencing volume path %q for %q", vp, composeFile)
+				continue
+			}
+			volumePaths = append(volumePaths, vp)
+		}
 	}
 	terminalOut.PerfStart("Discover state: parse compose files")()
 
+	terminalOut.Logf("discoverState: %d compose file(s) before volume-path filter, volumePaths=%v", len(relevantComposeFiles), volumePaths)
 	filteredComposeFiles := filterComposeFilesByVolumePaths(relevantComposeFiles, volumePaths)
+	terminalOut.Logf("discoverState: %d compose file(s) after volume-path filter: %v", len(filteredComposeFiles), filteredComposeFiles)
 	state.ComposeFiles = filteredComposeFiles
 
 	networkSet := make(map[string]struct{})
