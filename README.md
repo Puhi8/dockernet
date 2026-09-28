@@ -55,8 +55,11 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o dockernet .
 # List running entries in bridge network
 dockernet ps --running --network bridge
 
-# Include published/exposed ports in ps output
+# Include forwarded ports in ps output
 dockernet ps --ports
+
+# Also include exposed (not forwarded) ports
+dockernet ps --ports-exposed
 
 # Optional: include protocol in ports output
 dockernet ps --ports --ports-protocol

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -272,7 +273,7 @@ func psComposeIdentity(entry IPEntry) string {
 	return "-"
 }
 
-func enrichPSRowsWithPorts(rows []IPEntry, composePorts, dockerPorts []IPEntry, includeProtocol, includeSummaries bool) []IPEntry {
+func enrichPSRowsWithPorts(rows []IPEntry, composePorts, dockerPorts []IPEntry, includeProtocol, includeSummaries, includeExposed bool) []IPEntry {
 	defer terminalOut.PerfStart("Enrich PS rows with ports")()
 
 	if len(rows) == 0 {
@@ -292,6 +293,9 @@ func enrichPSRowsWithPorts(rows []IPEntry, composePorts, dockerPorts []IPEntry, 
 		if len(summaries) > 0 {
 			enriched[idx].HasPorts = true
 			if includeSummaries {
+				if !includeExposed {
+					summaries = slices.DeleteFunc(summaries, func(summary string) bool { return !strings.Contains(summary, "->") })
+				}
 				enriched[idx].Ports = summaries
 			}
 		}

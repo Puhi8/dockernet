@@ -116,6 +116,8 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 	var allInOne bool
 	var showPorts bool
 	var showPortProtocols bool
+	var showExposedPorts bool
+	var showExposedPortProtocols bool
 	terminalOut.AddFlag(flagSet, &networkFilter, "n", "network", "", "network filter")
 	terminalOut.AddFlag(flagSet, &ipPrefix, "i", "ip-prefix", "", "ip prefix filter")
 	addGroupSelectionFlags(flagSet, &groupName, &groupNumber, "group filter")
@@ -123,13 +125,19 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 	terminalOut.AddFlag(flagSet, &runningOnly, "r", "running", false, "only running")
 	terminalOut.AddFlag(flagSet, &composeOnly, "c", "compose-only", false, "only compose entries")
 	terminalOut.AddFlag(flagSet, &allInOne, "a", "all-in-one", false, "print one combined table")
-	terminalOut.AddFlag(flagSet, &showPorts, "p", "ports", false, "include exposed/published ports column")
+	terminalOut.AddFlag(flagSet, &showPorts, "p", "ports", false, "include forwarded ports column")
 	terminalOut.AddFlag(flagSet, &showPortProtocols, "pp", "ports-protocol", false, "include protocol in ports column")
+	terminalOut.AddFlag(flagSet, &showExposedPorts, "pe", "ports-exposed", false, "include exposed (not forwarded) ports in ports column")
+	terminalOut.AddFlag(flagSet, &showExposedPortProtocols, "ppe", "ports-protocol-exposed", false, "include exposed ports and protocol in ports column")
 
 	if err := parseNoPositionalArgs(flagSet, args, "ps"); err != nil {
 		return exitCodeRuntime, err
 	}
-	if showPortProtocols {
+	if showExposedPortProtocols {
+		showPortProtocols = true
+		showExposedPorts = true
+	}
+	if showPortProtocols || showExposedPorts {
 		showPorts = true
 	}
 	sortBy = strings.ToLower(strings.TrimSpace(sortBy))
@@ -176,7 +184,7 @@ func runPS(ctx context.Context, opts runtimeOptions, args []string, stdout, stde
 	terminalOut.PerfStart("PS: filter rows")()
 	sortEntries(filteredRows, sortByStringMap[sortBy])
 	terminalOut.PerfStart("PS: sort rows")()
-	filteredRows = enrichPSRowsWithPorts(filteredRows, state.ComposePorts, state.DockerPorts, showPortProtocols, showPorts)
+	filteredRows = enrichPSRowsWithPorts(filteredRows, state.ComposePorts, state.DockerPorts, showPortProtocols, showPorts, showExposedPorts)
 	terminalOut.PerfStart("PS: attach ports")()
 
 	if opts.JSON {
