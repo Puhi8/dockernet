@@ -1,0 +1,40 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: |
+          mkdir dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            goos="${target%/*}" goarch="${target#*/}"
+            extension=""
+            [ "$goos" = windows ] && extension=".exe"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "dist/dockernet-$goos-$goarch$extension" .
+          done
+          cd dist
+          for binary in *; do
+            case "$binary" in
+              *.exe) zip -q "${binary%.exe}.zip" "$binary" ;;
+              *) tar -czf "$binary.tar.gz" "$binary" ;;
+            esac
+          done
+          sha256sum ./*.tar.gz ./*.zip > checksums.txt
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.zip dist/checksums.txt --title "dockernet $GITHUB_REF_NAME" --generate-notes
